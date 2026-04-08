@@ -32,6 +32,11 @@ from skills.data_fetchers.fear_greed import (
     fear_greed_signal,
 )
 from skills.data_fetchers.rss_feeds import fetch_rss_feeds, filter_articles_by_keywords
+from skills.data_fetchers.defillama import fetch_defi_snapshot
+from skills.data_fetchers.coinglass import fetch_derivatives_snapshot
+
+
+_MODEL_NAME = "gemini-2.5-flash-preview-04-17"
 
 
 # ------------------------------------------------------------------
@@ -61,6 +66,12 @@ You have access to the following real-time data:
 
 --- RSS News Feeds ---
 {rss_data}
+
+=== DEFI ECOSYSTEM (DeFiLlama) ===
+{defi_data}
+
+=== DERIVATIVES MARKET (CoinGlass) ===
+{derivatives_data}
 
 ---
 Based on this data, produce a structured JSON briefing with EXACTLY this format:
@@ -126,7 +137,7 @@ class InvestigatorAgent:
         self._coingecko = CoinGeckoClient(api_key=coingecko_api_key)
 
         genai.configure(api_key=gemini_api_key)
-        self._model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
+        self._model = genai.GenerativeModel(_MODEL_NAME)
 
     # ------------------------------------------------------------------
     # Data collection
@@ -278,6 +289,52 @@ class InvestigatorAgent:
         except Exception as e:
             return f"RSS feeds error: {e}"
 
+    def _collect_defi(self) -> str:
+        """Fetches DeFi TVL snapshot from DeFiLlama."""
+        try:
+            snapshot = fetch_defi_snapshot()  # public API, no auth
+            g = snapshot.get("global", {})
+            tvl = g.get("current_tvl_usd", 0)
+            chg = g.get("tvl_change_7d_pct")
+            signal = g.get("signal", 0.0)
+
+            chains = snapshot.get("chains", [])
+            chain_lines = [
+                f"  {c['chain']}: ${c['tvl_usd']:,.0f}"
+                for c in chains[:5]
+            ]
+
+            chg_str = f"{chg:+.2f}%" if chg is not None else "N/A"
+            return (
+                f"  Total DeFi TVL: ${tvl:,.0f} | 7d change: {chg_str} | Signal: {signal:+.2f}\n"
+                + "\n".join(chain_lines)
+            )
+        except Exception as e:
+            return f"DeFiLlama error: {e}"
+
+    def _collect_derivatives(self, tickers: list[str]) -> str:
+        """Fetches funding rates and long/short ratios from CoinGlass."""
+        try:
+            snapshot = fetch_derivatives_snapshot(tickers)
+            lines = []
+
+            for fr in snapshot.get("funding_rates", []):
+                ticker = fr.get("ticker", "?")
+                rate = fr.get("avg_funding_rate_pct", 0)
+                interp = fr.get("interpretation", "")
+                lines.append(f"  {ticker} Funding: {rate:+.4f}% — {interp}")
+
+            for ls in snapshot.get("long_short_ratios", []):
+                ticker = ls.get("ticker", "?")
+                long_pct = ls.get("long_pct", 50)
+                short_pct = ls.get("short_pct", 50)
+                interp = ls.get("interpretation", "")
+                lines.append(f"  {ticker} L/S: {long_pct:.1f}% / {short_pct:.1f}% — {interp}")
+
+            return "\n".join(lines) if lines else "Derivatives data unavailable."
+        except Exception as e:
+            return f"CoinGlass error: {e}"
+
     # ------------------------------------------------------------------
     # Synthesis with Gemini Flash
     # ------------------------------------------------------------------
@@ -290,6 +347,8 @@ class InvestigatorAgent:
         news: str,
         fear_greed: str,
         rss_feeds: str,
+        defi: str,
+        derivatives: str,
     ) -> dict:
         """Calls Gemini 2.5 Flash and returns the structured briefing."""
         prompt = _INVESTIGATOR_PROMPT.format(
@@ -299,6 +358,8 @@ class InvestigatorAgent:
             news_data=news,
             fear_greed_data=fear_greed,
             rss_data=rss_feeds,
+            defi_data=defi,
+            derivatives_data=derivatives,
         )
 
         response = self._model.generate_content(prompt)
@@ -355,9 +416,18 @@ class InvestigatorAgent:
         print("[Investigator] Fetching RSS feeds...")
         rss_feeds = self._collect_rss_feeds(watchlist)
 
+        print("[Investigator] Fetching DeFi TVL (DeFiLlama)...")
+        defi = self._collect_defi()
+
+        print("[Investigator] Fetching derivatives data (CoinGlass)...")
+        derivatives = self._collect_derivatives(watchlist)
+
         print("[Investigator] Synthesising with Gemini 2.5 Flash...")
         try:
-            briefing = self._synthesize(macro, market, technical, news, fear_greed, rss_feeds)
+            briefing = self._synthesize(
+                macro, market, technical, news,
+                fear_greed, rss_feeds, defi, derivatives,
+            )
         except json.JSONDecodeError as e:
             print(f"[Investigator] WARNING — invalid JSON from Gemini: {e}. Using fallback.")
             briefing = {
@@ -381,12 +451,14 @@ class InvestigatorAgent:
             "timestamp": ts,
             "watchlist": watchlist,
             "raw_data": {
-                "macro":      macro,
-                "market":     market,
-                "technical":  technical,
-                "news":       news,
-                "fear_greed": fear_greed,
-                "rss_feeds":  rss_feeds,
+                "macro":       macro,
+                "market":      market,
+                "technical":   technical,
+                "news":        news,
+                "fear_greed":  fear_greed,
+                "rss_feeds":   rss_feeds,
+                "defi":        defi,
+                "derivatives": derivatives,
             },
             "briefing": briefing,
         }

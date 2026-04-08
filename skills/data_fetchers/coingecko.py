@@ -54,14 +54,9 @@ class CoinGeckoClient:
     # ------------------------------------------------------------------
 
     def resolve_id(self, ticker: str) -> str:
-        """Converts a ticker (e.g. BTC) to a CoinGecko ID (e.g. bitcoin)."""
-        cg_id = TICKER_TO_ID.get(ticker.upper())
-        if not cg_id:
-            raise ValueError(
-                f"Ticker '{ticker}' not mapped. "
-                f"Add it to TICKER_TO_ID or use the CoinGecko ID directly."
-            )
-        return cg_id
+        """Converts a ticker (e.g. BTC) to a CoinGecko ID (e.g. bitcoin).
+        Falls back to lowercased ticker if not in the map."""
+        return TICKER_TO_ID.get(ticker.upper(), ticker.lower())
 
     def get(self, endpoint: str, params: dict) -> dict | list:
         url = f"{COINGECKO_BASE_URL}{endpoint}"

@@ -32,7 +32,7 @@ from enum import Enum
 from pathlib import Path
 
 MEMORY_DIR = Path(__file__).parent.parent / "memory"
-MEMORY_DIR.mkdir(exist_ok=True)
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ------------------------------------------------------------------
@@ -126,9 +126,9 @@ class HyperliquidExecutor:
         self.wallet_address = wallet_address
         self.leverage = leverage
         self.slippage_pct = slippage_pct
-        self._open_positions: dict[str, HLOrder] = {}
         self._exchange = None
         self._info = None
+        self._open_positions: dict[str, HLOrder] = self._load_open_positions()
 
         if mode in (HLMode.TEST, HLMode.LIVE):
             if not wallet_address or not private_key:
@@ -185,18 +185,64 @@ class HyperliquidExecutor:
         return exchange, info
 
     # ------------------------------------------------------------------
+    # Position persistence across restarts
+    # ------------------------------------------------------------------
+
+    def _load_open_positions(self) -> dict[str, HLOrder]:
+        """
+        Restores open positions from disk on startup.
+        Cross-references trades-history.json against closed-trades.json
+        to determine which fills are still open.
+        """
+        trades_path = MEMORY_DIR / "trades-history.json"
+        closed_path = MEMORY_DIR / "closed-trades.json"
+
+        if not trades_path.exists():
+            return {}
+
+        try:
+            all_trades: list[dict] = json.loads(trades_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+        # Build set of closed order IDs
+        closed_ids: set[str] = set()
+        if closed_path.exists():
+            try:
+                closed = json.loads(closed_path.read_text(encoding="utf-8"))
+                closed_ids = {c["order_id"] for c in closed if c.get("order_id")}
+            except Exception:
+                pass
+
+        open_positions: dict[str, HLOrder] = {}
+        fields = HLOrder.__dataclass_fields__.keys()
+        for trade in all_trades:
+            if trade.get("status") != "filled":
+                continue
+            if trade.get("id") in closed_ids:
+                continue
+            ticker = trade.get("ticker", "")
+            if not ticker:
+                continue
+            try:
+                order = HLOrder(**{k: v for k, v in trade.items() if k in fields})
+                open_positions[ticker] = order
+            except Exception:
+                continue
+
+        if open_positions:
+            print(f"[HL Executor] Restored {len(open_positions)} open position(s): "
+                  f"{list(open_positions.keys())}")
+        return open_positions
+
+    # ------------------------------------------------------------------
     # Normalização de coin
     # ------------------------------------------------------------------
 
     def _coin(self, ticker: str) -> str:
         """Converte ticker interno para nome Hyperliquid."""
         t = ticker.upper()
-        if t not in HL_COIN_MAP:
-            raise ValueError(
-                f"Ticker '{t}' não mapeado para Hyperliquid. "
-                f"Adiciona a HL_COIN_MAP em hyperliquid.py."
-            )
-        return HL_COIN_MAP[t]
+        return HL_COIN_MAP.get(t, t)  # fallback para o próprio ticker
 
     # ------------------------------------------------------------------
     # Submissão de ordem
@@ -424,7 +470,9 @@ class HyperliquidExecutor:
         pnl_usd = original.size_usd * (pnl_pct / 100)
 
         close_record = {
+            "order_id":   original.id,
             "ticker":     ticker,
+            "side":       original.side,
             "open_price": entry,
             "close_price": current_price,
             "size_usd":   original.size_usd,
@@ -467,55 +515,6 @@ class HyperliquidExecutor:
 
     def get_open_positions(self) -> list[dict]:
         return [o.to_dict() for o in self._open_positions.values()]
-
-    # ------------------------------------------------------------------
-    # Integração com novo orquestrador (recebe ManagerDecision dicts)
-    # ------------------------------------------------------------------
-
-    def process_manager_decisions(self, manager_output: dict) -> list[HLOrder]:
-        """
-        Processa as decisões do agente gestor após aprovação Telegram.
-        Executa apenas decisões acionáveis (BUY/SELL não rejeitadas).
-
-        Args:
-            manager_output: Output de ManagerAgent.run() após aprovação humana.
-
-        Returns:
-            Lista de HLOrder executadas.
-        """
-        executed: list[HLOrder] = []
-
-        for decision in manager_output.get("actionable", []):
-            ticker    = decision.get("ticker", "?")
-            direction = decision.get("direction", "HOLD")
-            size_usd  = float(decision.get("position_size_usd", 0))
-            entry     = float(decision.get("entry_price", 0))
-            stop      = float(decision.get("stop_loss_price", 0))
-            tp        = float(decision.get("take_profit_price", 0))
-            thesis    = decision.get("thesis", "")
-
-            if direction not in ("BUY", "SELL") or size_usd <= 0 or entry <= 0:
-                continue
-
-            if ticker in self._open_positions:
-                print(f"[HL Executor] {ticker} já tem posição aberta — ignorado")
-                continue
-
-            try:
-                order = self.submit_order(
-                    ticker=ticker,
-                    side=direction.lower(),
-                    size_usd=size_usd,
-                    entry_price=entry,
-                    stop_loss_price=stop,
-                    take_profit_price=tp,
-                    notes=thesis[:100],
-                )
-                executed.append(order)
-            except Exception as e:
-                print(f"[HL Executor] Erro ao executar {ticker}: {e}")
-
-        return executed
 
     # ------------------------------------------------------------------
     # Helpers

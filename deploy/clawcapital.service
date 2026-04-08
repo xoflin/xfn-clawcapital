@@ -1,0 +1,18 @@
+[Unit]
+Description=ClawCapital — Autonomous Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/xfn-clawcapital
+EnvironmentFile=/home/ubuntu/xfn-clawcapital/.env
+ExecStart=/home/ubuntu/xfn-clawcapital/.venv/bin/python main.py --loop 7200
+Restart=on-failure
+RestartSec=60
+StandardOutput=append:/var/log/clawcapital.log
+StandardError=append:/var/log/clawcapital.log
+
+[Install]
+WantedBy=multi-user.target

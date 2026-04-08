@@ -17,11 +17,12 @@ from agents.investigator import InvestigatorAgent
 from agents.manager import ManagerAgent
 from executor.hyperliquid import HyperliquidExecutor, HLMode
 from notifications.telegram import request_approval, send_notification, ApprovalResult
+from risk.drawdown import DrawdownTracker
 from skills.data_fetchers.coingecko import CoinGeckoClient
 
 
 MEMORY_DIR = Path(__file__).parent / "memory"
-MEMORY_DIR.mkdir(exist_ok=True)
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ------------------------------------------------------------------
@@ -133,6 +134,7 @@ class Orchestrator:
         self._tg_token   = telegram_bot_token
         self._tg_chat_id = telegram_chat_id
         self._coingecko  = CoinGeckoClient(api_key=coingecko_api_key)
+        self._drawdown   = DrawdownTracker(initial_capital=capital)
 
     # ------------------------------------------------------------------
     # Heartbeat
@@ -212,6 +214,63 @@ class Orchestrator:
         )
 
     # ------------------------------------------------------------------
+    # SL/TP monitor (paper + live)
+    # ------------------------------------------------------------------
+
+    def _check_sl_tp(self, market_prices: dict[str, float]) -> list[dict]:
+        """
+        Checks all open positions against current prices.
+        Auto-closes positions where SL or TP has been hit.
+        Records PnL into DrawdownTracker.
+
+        Returns:
+            List of close records for positions that were closed.
+        """
+        closed = []
+        for pos in self.executor.get_open_positions():
+            ticker = pos["ticker"]
+            price  = market_prices.get(ticker)
+            if price is None:
+                continue
+
+            side = pos["side"]
+            sl   = pos.get("stop_loss_price", 0)
+            tp   = pos.get("take_profit_price", 0)
+
+            hit = None
+            if side == "buy":
+                if sl > 0 and price <= sl:
+                    hit = ("SL", sl)
+                elif tp > 0 and price >= tp:
+                    hit = ("TP", tp)
+            else:  # sell
+                if sl > 0 and price >= sl:
+                    hit = ("SL", sl)
+                elif tp > 0 and price <= tp:
+                    hit = ("TP", tp)
+
+            if hit:
+                label, exit_price = hit
+                print(f"[Orchestrator] {ticker} {label} hit @ ${exit_price:,.4f} "
+                      f"(current: ${price:,.4f})")
+                record = self.executor.close_position(ticker, exit_price)
+                if record:
+                    record["exit_reason"] = label
+                    closed.append(record)
+                    self._drawdown.record_trade_close(record["pnl_usd"])
+                    send_notification(
+                        text=(
+                            f"{'✅' if label == 'TP' else '🛑'} "
+                            f"*{ticker} {label} hit*\n"
+                            f"Exit: ${exit_price:,.4f} | "
+                            f"PnL: ${record['pnl_usd']:+,.2f} ({record['pnl_pct']:+.2f}%)"
+                        ),
+                        bot_token=self._tg_token,
+                        chat_id=self._tg_chat_id,
+                    )
+        return closed
+
+    # ------------------------------------------------------------------
     # Main cycle
     # ------------------------------------------------------------------
 
@@ -280,10 +339,20 @@ class Orchestrator:
 
         time.sleep(2)
 
-        # ── 3. Current prices ────────────────────────────────────────
+        # ── 3. Current prices + SL/TP check ─────────────────────────
         print("\n[Orchestrator] Fetching current prices (CoinGecko)...")
         market_prices = self._get_current_prices()
         results["market_prices"] = market_prices
+
+        print("\n[Orchestrator] Checking SL/TP on open positions...")
+        sl_tp_closes = self._check_sl_tp(market_prices)
+        if sl_tp_closes:
+            results["sl_tp_closes"] = sl_tp_closes
+            print(f"[Orchestrator] {len(sl_tp_closes)} position(s) closed by SL/TP")
+
+        results["drawdown"] = self._drawdown.summary()
+        print(f"[Orchestrator] Drawdown — daily: {self._drawdown.daily_drawdown_pct:.2f}% | "
+              f"total: {self._drawdown.total_drawdown_pct:.2f}%")
 
         # ── 4. Manager ───────────────────────────────────────────────
         print("\n[Orchestrator] Running manager agent (Gemini Pro)...")
@@ -293,12 +362,15 @@ class Orchestrator:
                 investigator_output=investigator_output,
                 market_prices=market_prices,
                 open_positions=open_positions,
+                daily_drawdown_pct=self._drawdown.daily_drawdown_pct,
+                total_drawdown_pct=self._drawdown.total_drawdown_pct,
             )
+            actionable = manager_output.get("actionable", [])
             results["manager"] = {
                 "decisions":  manager_output["decisions"],
-                "actionable": manager_output["actionable"],
+                "actionable": [d.to_dict() for d in actionable],
             }
-            print(f"[Orchestrator] {len(manager_output['actionable'])} actionable decision(s)")
+            print(f"[Orchestrator] {len(actionable)} actionable decision(s)")
         except Exception as e:
             err = f"Manager failed: {e}\n{traceback.format_exc()}"
             print(f"[Orchestrator] ERROR — {e}")
@@ -309,7 +381,6 @@ class Orchestrator:
             return results
 
         # ── 5. Telegram approval + Execution ─────────────────────────
-        actionable = manager_output.get("actionable", [])
         approvals: list[dict] = []
 
         if not actionable:
@@ -328,26 +399,11 @@ class Orchestrator:
         else:
             print(f"\n[Orchestrator] Processing {len(actionable)} decision(s) via Telegram...")
             for decision in actionable:
-                ticker    = decision["ticker"]
-                direction = decision["direction"]
+                ticker    = decision.ticker
+                direction = decision.direction
                 print(f"\n  [{ticker}] {direction} — awaiting human approval...")
 
-                tg_briefing = {
-                    "ticker":            ticker,
-                    "direction":         direction,
-                    "combined_score":    decision.get("combined_score", 0),
-                    "confidence":        decision.get("confidence", 0),
-                    "price":             decision.get("entry_price", 0),
-                    "stop_loss_price":   decision.get("stop_loss_price", 0),
-                    "position_size_usd": decision.get("position_size_usd", 0),
-                    "risk_usd":          decision.get("risk_usd", 0),
-                    "thesis":            decision.get("thesis", ""),
-                    "macro_context":     decision.get("macro_context", ""),
-                    "technical_summary": decision.get("technical_summary", ""),
-                    "sentiment_summary": decision.get("sentiment_summary", ""),
-                }
-
-                approval = self._request_human_approval(tg_briefing)
+                approval = self._request_human_approval(decision.to_telegram_briefing())
                 approval_dict = approval.to_dict()
                 approval_dict["ticker"] = ticker
                 approvals.append(approval_dict)
@@ -358,11 +414,11 @@ class Orchestrator:
                         order = self.executor.submit_order(
                             ticker=ticker,
                             side=direction.lower(),
-                            size_usd=decision.get("position_size_usd", 0),
-                            entry_price=decision.get("entry_price", 0),
-                            stop_loss_price=decision.get("stop_loss_price", 0),
-                            take_profit_price=decision.get("take_profit_price", 0),
-                            notes=decision.get("thesis", "")[:100],
+                            size_usd=decision.position_size_usd,
+                            entry_price=decision.entry_price,
+                            stop_loss_price=decision.stop_loss_price,
+                            take_profit_price=decision.take_profit_price,
+                            notes=decision.thesis[:100],
                         )
                         results["executed_orders"].append(order.to_dict())
                         send_notification(
@@ -393,6 +449,7 @@ class Orchestrator:
 
         # ── 6. Summary and logging ────────────────────────────────────
         results["open_positions"] = self.executor.get_open_positions()
+        results["drawdown"]       = self._drawdown.summary()
         results["cycle_end"]      = datetime.now(timezone.utc).isoformat()
         results["status"]         = "OK" if not results["errors"] else "OK_WITH_ERRORS"
 
