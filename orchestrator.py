@@ -450,6 +450,7 @@ class Orchestrator:
         # ── 6. Summary and logging ────────────────────────────────────
         results["open_positions"] = self.executor.get_open_positions()
         results["drawdown"]       = self._drawdown.summary()
+        results["quota"]          = self.manager._quota.summary()
         results["cycle_end"]      = datetime.now(timezone.utc).isoformat()
         results["status"]         = "OK" if not results["errors"] else "OK_WITH_ERRORS"
 

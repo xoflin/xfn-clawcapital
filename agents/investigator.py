@@ -33,6 +33,7 @@ from skills.data_fetchers.fear_greed import (
 )
 from skills.data_fetchers.rss_feeds import fetch_rss_feeds, filter_articles_by_keywords
 from skills.data_fetchers.defillama import fetch_defi_snapshot
+from risk.quota import QuotaTracker
 from skills.data_fetchers.coinglass import fetch_derivatives_snapshot
 
 
@@ -138,6 +139,7 @@ class InvestigatorAgent:
 
         genai.configure(api_key=gemini_api_key)
         self._model = genai.GenerativeModel(_MODEL_NAME)
+        self._quota = QuotaTracker()
 
     # ------------------------------------------------------------------
     # Data collection
@@ -189,6 +191,10 @@ class InvestigatorAgent:
         av = AlphaVantageClient(api_key=self.alpha_vantage_key)
         lines = []
         for ticker in tickers[:self.max_av_tickers]:
+            allowed, reason = self._quota.check_and_consume("alpha_vantage")
+            if not allowed:
+                lines.append(f"  {ticker}: skipped — {reason}")
+                continue
             try:
                 report = av.get_technical_report(ticker)
                 rsi    = report.get("rsi_latest") or {}
@@ -361,6 +367,10 @@ class InvestigatorAgent:
             defi_data=defi,
             derivatives_data=derivatives,
         )
+
+        allowed, reason = self._quota.check_and_consume("gemini_flash")
+        if not allowed:
+            raise RuntimeError(f"Gemini Flash quota: {reason}")
 
         response = self._model.generate_content(prompt)
         raw = response.text.strip()

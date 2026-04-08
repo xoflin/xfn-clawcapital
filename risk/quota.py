@@ -1,0 +1,107 @@
+"""
+Risk: API Quota Tracker
+Persists daily API call counts to prevent exhausting limited quotas.
+
+Currently tracked:
+  - gemini_pro:   100 req/day (free tier) — ManagerAgent
+  - gemini_flash: 1500 req/day (free tier) — InvestigatorAgent
+  - alpha_vantage: 25 req/day (free tier)
+
+Resets counts automatically at midnight UTC.
+"""
+
+import json
+from datetime import date
+from pathlib import Path
+
+QUOTA_FILE = Path(__file__).parent.parent / "memory" / "quota-state.json"
+
+# Daily limits per service
+DAILY_LIMITS: dict[str, int] = {
+    "gemini_pro":    100,
+    "gemini_flash":  1500,
+    "alpha_vantage": 25,
+}
+
+# Safety threshold — stop at this % of limit to leave headroom
+SAFETY_PCT = 0.90
+
+
+class QuotaTracker:
+    """
+    Persistent daily quota tracker. Survives restarts.
+    Call check_and_consume() before each API call.
+    """
+
+    def __init__(self):
+        self._state = self._load()
+        self._reset_if_new_day()
+
+    def _load(self) -> dict:
+        if QUOTA_FILE.exists():
+            try:
+                return json.loads(QUOTA_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {"date": date.today().isoformat(), "counts": {}}
+
+    def _save(self) -> None:
+        QUOTA_FILE.parent.mkdir(parents=True, exist_ok=True)
+        QUOTA_FILE.write_text(
+            json.dumps(self._state, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _reset_if_new_day(self) -> None:
+        today = date.today().isoformat()
+        if self._state.get("date") != today:
+            self._state = {"date": today, "counts": {}}
+            self._save()
+
+    def check_and_consume(self, service: str) -> tuple[bool, str]:
+        """
+        Checks quota and consumes 1 call if available.
+
+        Args:
+            service: Service name (e.g. "gemini_pro").
+
+        Returns:
+            (allowed: bool, reason: str)
+        """
+        limit = DAILY_LIMITS.get(service)
+        if limit is None:
+            return True, ""  # Unknown service — no limit enforced
+
+        current = self._state["counts"].get(service, 0)
+        threshold = int(limit * SAFETY_PCT)
+
+        if current >= threshold:
+            remaining = limit - current
+            return False, (
+                f"{service} daily quota at safety limit "
+                f"({current}/{limit} used, {remaining} remaining — "
+                f"threshold: {threshold})"
+            )
+
+        self._state["counts"][service] = current + 1
+        self._save()
+        return True, ""
+
+    def remaining(self, service: str) -> int:
+        """Returns remaining calls for a service today."""
+        limit = DAILY_LIMITS.get(service, 0)
+        used = self._state["counts"].get(service, 0)
+        return max(0, limit - used)
+
+    def summary(self) -> dict:
+        return {
+            "date": self._state["date"],
+            "usage": {
+                service: {
+                    "used":      self._state["counts"].get(service, 0),
+                    "limit":     limit,
+                    "remaining": self.remaining(service),
+                }
+                for service, limit in DAILY_LIMITS.items()
+            },
+        }

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import google.generativeai as genai
 
 from risk.calculator import RiskCalculator, RiskConfig, SizingMethod
+from risk.quota import QuotaTracker
 
 
 # ------------------------------------------------------------------
@@ -177,6 +178,7 @@ class ManagerAgent:
 
         genai.configure(api_key=gemini_api_key)
         self._model = genai.GenerativeModel(_MODEL_NAME)
+        self._quota = QuotaTracker()
 
         self._risk = RiskCalculator(RiskConfig(
             max_risk_per_trade_pct=max_risk_pct,
@@ -213,6 +215,10 @@ class ManagerAgent:
             max_positions=self.max_positions,
             market_prices=prices_str,
         )
+
+        allowed, reason = self._quota.check_and_consume("gemini_pro")
+        if not allowed:
+            raise RuntimeError(f"Gemini Pro quota: {reason}")
 
         response = self._model.generate_content(prompt)
         raw = response.text.strip()
