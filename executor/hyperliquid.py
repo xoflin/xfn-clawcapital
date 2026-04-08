@@ -1,0 +1,579 @@
+"""
+Executor: Hyperliquid L1
+Submete ordens de perpetuais ao Hyperliquid via SDK oficial.
+
+Vantagens arquitecturais do Hyperliquid:
+  - Sem mempool público → sem frontrunning por bots MEV
+  - L1 dedicado a trading → latência < 1s
+  - Perpetuais com até 50x leverage (usamos 1x por padrão — sem alavancagem)
+
+Modos:
+  PAPER — simula fills localmente, sem ligação à rede
+  LIVE  — ordem real assinada com chave privada Ethereum → Hyperliquid mainnet
+  TEST  — usa testnet Hyperliquid (app.hyperliquid-testnet.xyz)
+
+Dependência:
+  pip install hyperliquid-python-sdk
+
+Variáveis de ambiente (modo LIVE/TEST):
+  HL_WALLET_ADDRESS   — endereço Ethereum (0x...)
+  HL_PRIVATE_KEY      — chave privada (nunca commitar)
+  HL_AGENT_KEY        — chave de agente opcional (sub-account para isolar risco)
+
+Referência SDK:
+  https://github.com/hyperliquid-dex/hyperliquid-python-sdk
+"""
+
+import json
+import uuid
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+
+MEMORY_DIR = Path(__file__).parent.parent / "memory"
+MEMORY_DIR.mkdir(exist_ok=True)
+
+
+# ------------------------------------------------------------------
+# Enums e constantes
+# ------------------------------------------------------------------
+
+class HLMode(Enum):
+    PAPER = "paper"   # Simulação local
+    TEST  = "test"    # Testnet Hyperliquid
+    LIVE  = "live"    # Mainnet Hyperliquid
+
+
+HL_MAINNET_URL = "https://api.hyperliquid.xyz"
+HL_TESTNET_URL = "https://api.hyperliquid-testnet.xyz"
+
+# Hyperliquid usa nomes exactos para os pares perpetuais
+# Adicionar conforme necessário
+HL_COIN_MAP: dict[str, str] = {
+    "BTC":  "BTC",
+    "ETH":  "ETH",
+    "SOL":  "SOL",
+    "ARB":  "ARB",
+    "OP":   "OP",
+    "AVAX": "AVAX",
+    "BNB":  "BNB",
+    "MATIC": "MATIC",
+    "DOGE": "DOGE",
+    "LINK": "LINK",
+}
+
+
+# ------------------------------------------------------------------
+# Estrutura de ordem
+# ------------------------------------------------------------------
+
+@dataclass
+class HLOrder:
+    id: str
+    ticker: str
+    coin: str                          # Nome Hyperliquid (ex: "BTC")
+    side: str                          # "buy" | "sell"
+    size_usd: float
+    size_units: float                  # Quantidade em moeda base
+    entry_price: float
+    stop_loss_price: float
+    take_profit_price: float
+    leverage: int = 1                  # 1 = sem alavancagem
+    mode: str = HLMode.PAPER.value
+    status: str = "pending"
+    filled_price: float | None = None
+    filled_at: str | None = None
+    hl_order_id: int | None = None     # OID devolvido pelo Hyperliquid
+    sl_order_id: int | None = None
+    tp_order_id: int | None = None
+    notes: str = ""
+    created_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+# ------------------------------------------------------------------
+# Executor Hyperliquid
+# ------------------------------------------------------------------
+
+class HyperliquidExecutor:
+    """
+    Submete ordens de perpetuais ao Hyperliquid L1.
+
+    Args:
+        mode:            PAPER (simulação), TEST (testnet) ou LIVE (mainnet).
+        wallet_address:  Endereço Ethereum (obrigatório em TEST/LIVE).
+        private_key:     Chave privada para assinar ordens (obrigatório em TEST/LIVE).
+        agent_key:       Chave de agente opcional (sub-account isolada).
+        leverage:        Alavancagem por defeito (default 1 = sem alavancagem).
+        slippage_pct:    Tolerância de slippage para ordens a mercado (default 0.1%).
+    """
+
+    def __init__(
+        self,
+        mode: HLMode = HLMode.PAPER,
+        wallet_address: str | None = None,
+        private_key: str | None = None,
+        agent_key: str | None = None,
+        leverage: int = 1,
+        slippage_pct: float = 0.1,
+    ):
+        self.mode = mode
+        self.wallet_address = wallet_address
+        self.leverage = leverage
+        self.slippage_pct = slippage_pct
+        self._open_positions: dict[str, HLOrder] = {}
+        self._exchange = None
+        self._info = None
+
+        if mode in (HLMode.TEST, HLMode.LIVE):
+            if not wallet_address or not private_key:
+                raise ValueError(
+                    "wallet_address e private_key são obrigatórios em modo TEST/LIVE."
+                )
+            self._exchange, self._info = self._init_hl(
+                wallet_address=wallet_address,
+                private_key=private_key,
+                agent_key=agent_key,
+                testnet=(mode == HLMode.TEST),
+            )
+
+    # ------------------------------------------------------------------
+    # Inicialização SDK Hyperliquid
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _init_hl(
+        wallet_address: str,
+        private_key: str,
+        agent_key: str | None,
+        testnet: bool,
+    ):
+        try:
+            from hyperliquid.exchange import Exchange
+            from hyperliquid.info import Info
+            import eth_account
+        except ImportError:
+            raise ImportError(
+                "SDK Hyperliquid não instalado. Execute: pip install hyperliquid-python-sdk"
+            )
+
+        base_url = HL_TESTNET_URL if testnet else HL_MAINNET_URL
+
+        # Construir wallet a partir da chave privada
+        account = eth_account.Account.from_key(private_key)
+
+        # Chave de agente (opcional — isola permissões de trading)
+        if agent_key:
+            agent_account = eth_account.Account.from_key(agent_key)
+        else:
+            agent_account = account
+
+        exchange = Exchange(
+            account=agent_account,
+            base_url=base_url,
+            account_address=wallet_address,
+        )
+        info = Info(base_url=base_url, skip_ws=True)
+
+        env = "TESTNET" if testnet else "MAINNET"
+        print(f"[HL Executor] Ligado ao Hyperliquid {env} — wallet: {wallet_address[:10]}...")
+        return exchange, info
+
+    # ------------------------------------------------------------------
+    # Normalização de coin
+    # ------------------------------------------------------------------
+
+    def _coin(self, ticker: str) -> str:
+        """Converte ticker interno para nome Hyperliquid."""
+        t = ticker.upper()
+        if t not in HL_COIN_MAP:
+            raise ValueError(
+                f"Ticker '{t}' não mapeado para Hyperliquid. "
+                f"Adiciona a HL_COIN_MAP em hyperliquid.py."
+            )
+        return HL_COIN_MAP[t]
+
+    # ------------------------------------------------------------------
+    # Submissão de ordem
+    # ------------------------------------------------------------------
+
+    def submit_order(
+        self,
+        ticker: str,
+        side: str,                     # "buy" | "sell"
+        size_usd: float,
+        entry_price: float,
+        stop_loss_price: float,
+        take_profit_price: float,
+        notes: str = "",
+    ) -> HLOrder:
+        """
+        Cria e submete uma ordem de perpetual no Hyperliquid.
+
+        Em PAPER: fill simulado imediato.
+        Em TEST/LIVE: assina e envia ao L1 via SDK.
+
+        Args:
+            ticker:            Ticker do ativo (ex: "BTC").
+            side:              "buy" ou "sell".
+            size_usd:          Valor da posição em USD.
+            entry_price:       Preço de entrada (usado para calcular size_units).
+            stop_loss_price:   Preço de stop loss.
+            take_profit_price: Preço de take profit.
+            notes:             Notas adicionais para o registo.
+
+        Returns:
+            HLOrder com estado preenchido.
+        """
+        coin = self._coin(ticker)
+        size_units = round(size_usd / entry_price, 6)
+
+        order = HLOrder(
+            id=str(uuid.uuid4())[:8],
+            ticker=ticker.upper(),
+            coin=coin,
+            side=side.lower(),
+            size_usd=size_usd,
+            size_units=size_units,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            leverage=self.leverage,
+            mode=self.mode.value,
+            notes=notes,
+        )
+
+        print(f"\n[HL Executor] Nova ordem #{order.id}")
+        print(f"  {side.upper()} {size_units:.6f} {ticker} "
+              f"@ ${entry_price:,.4f} ({self.mode.value})")
+        print(f"  SL: ${stop_loss_price:,.4f} | TP: ${take_profit_price:,.4f}")
+
+        if self.mode == HLMode.PAPER:
+            self._fill_paper(order)
+        else:
+            self._fill_live(order)
+
+        self._open_positions[ticker.upper()] = order
+        self._log_order(order)
+        return order
+
+    # ------------------------------------------------------------------
+    # Paper fill
+    # ------------------------------------------------------------------
+
+    def _fill_paper(self, order: HLOrder) -> None:
+        order.filled_price = order.entry_price
+        order.filled_at = datetime.now(timezone.utc).isoformat()
+        order.status = "filled"
+        order.hl_order_id = -1
+        order.sl_order_id = -2
+        order.tp_order_id = -3
+        print(f"  [PAPER] Filled @ ${order.filled_price:,.4f}")
+
+    # ------------------------------------------------------------------
+    # Live fill (Hyperliquid SDK)
+    # ------------------------------------------------------------------
+
+    def _fill_live(self, order: HLOrder) -> None:
+        """
+        Submete três ordens ao Hyperliquid:
+          1. Ordem principal a mercado (IOC — Immediate Or Cancel)
+          2. Stop Loss trigger order
+          3. Take Profit trigger order
+        """
+        is_buy = order.side == "buy"
+
+        # 1. Ordem principal (market via IOC limit com slippage)
+        slippage = self.slippage_pct / 100
+        if is_buy:
+            limit_px = round(order.entry_price * (1 + slippage), 6)
+        else:
+            limit_px = round(order.entry_price * (1 - slippage), 6)
+
+        try:
+            result = self._exchange.order(
+                coin=order.coin,
+                is_buy=is_buy,
+                sz=order.size_units,
+                limit_px=limit_px,
+                order_type={"limit": {"tif": "Ioc"}},  # IOC = market
+                reduce_only=False,
+            )
+            self._check_hl_response(result, "ordem principal")
+            status_data = result.get("response", {}).get("data", {})
+            statuses = status_data.get("statuses", [{}])
+            filled = statuses[0] if statuses else {}
+            order.hl_order_id = filled.get("resting", {}).get("oid") or filled.get("filled", {}).get("oid")
+            order.filled_price = float(filled.get("filled", {}).get("avgPx", order.entry_price) or order.entry_price)
+            order.filled_at = datetime.now(timezone.utc).isoformat()
+            order.status = "filled"
+            print(f"  [LIVE] Filled @ ${order.filled_price:,.4f} | OID: {order.hl_order_id}")
+        except Exception as e:
+            order.status = "rejected"
+            order.notes += f" | Erro ordem principal: {e}"
+            print(f"  [LIVE] ERRO na ordem principal: {e}")
+            raise
+
+        # 2. Stop Loss (trigger order — executa a mercado quando atingido)
+        try:
+            sl_result = self._exchange.order(
+                coin=order.coin,
+                is_buy=not is_buy,       # Inverso: fecha posição
+                sz=order.size_units,
+                limit_px=order.stop_loss_price,
+                order_type={
+                    "trigger": {
+                        "triggerPx": order.stop_loss_price,
+                        "isMarket": True,
+                        "tpsl": "sl",
+                    }
+                },
+                reduce_only=True,
+            )
+            self._check_hl_response(sl_result, "stop loss")
+            sl_statuses = sl_result.get("response", {}).get("data", {}).get("statuses", [{}])
+            order.sl_order_id = sl_statuses[0].get("resting", {}).get("oid")
+            print(f"  [LIVE] SL colocado @ ${order.stop_loss_price:,.4f} | OID: {order.sl_order_id}")
+        except Exception as e:
+            order.notes += f" | SL manual necessário @ ${order.stop_loss_price:.4f}: {e}"
+            print(f"  [LIVE] AVISO: SL não colocado — {e}")
+
+        # 3. Take Profit (trigger order)
+        try:
+            tp_result = self._exchange.order(
+                coin=order.coin,
+                is_buy=not is_buy,
+                sz=order.size_units,
+                limit_px=order.take_profit_price,
+                order_type={
+                    "trigger": {
+                        "triggerPx": order.take_profit_price,
+                        "isMarket": True,
+                        "tpsl": "tp",
+                    }
+                },
+                reduce_only=True,
+            )
+            self._check_hl_response(tp_result, "take profit")
+            tp_statuses = tp_result.get("response", {}).get("data", {}).get("statuses", [{}])
+            order.tp_order_id = tp_statuses[0].get("resting", {}).get("oid")
+            print(f"  [LIVE] TP colocado @ ${order.take_profit_price:,.4f} | OID: {order.tp_order_id}")
+        except Exception as e:
+            order.notes += f" | TP manual necessário @ ${order.take_profit_price:.4f}: {e}"
+            print(f"  [LIVE] AVISO: TP não colocado — {e}")
+
+    # ------------------------------------------------------------------
+    # Fechar posição
+    # ------------------------------------------------------------------
+
+    def close_position(self, ticker: str, current_price: float) -> dict | None:
+        """
+        Fecha posição aberta a mercado.
+        Em LIVE: cancela SL/TP pendentes e submete ordem de fecho.
+        """
+        ticker = ticker.upper()
+        if ticker not in self._open_positions:
+            print(f"[HL Executor] Sem posição aberta para {ticker}")
+            return None
+
+        original = self._open_positions[ticker]
+        close_side = "sell" if original.side == "buy" else "buy"
+        coin = original.coin
+
+        print(f"[HL Executor] A fechar {ticker} @ ${current_price:,.4f}")
+
+        if self.mode in (HLMode.TEST, HLMode.LIVE):
+            # Cancelar SL e TP
+            for oid in [original.sl_order_id, original.tp_order_id]:
+                if oid and oid > 0:
+                    try:
+                        self._exchange.cancel(coin=coin, oid=oid)
+                    except Exception:
+                        pass
+
+            # Ordem de fecho a mercado
+            slippage = self.slippage_pct / 100
+            is_buy = close_side == "buy"
+            limit_px = round(
+                current_price * (1 + slippage) if is_buy else current_price * (1 - slippage),
+                6,
+            )
+            try:
+                self._exchange.order(
+                    coin=coin,
+                    is_buy=is_buy,
+                    sz=original.size_units,
+                    limit_px=limit_px,
+                    order_type={"limit": {"tif": "Ioc"}},
+                    reduce_only=True,
+                )
+            except Exception as e:
+                print(f"  [LIVE] ERRO ao fechar posição: {e}")
+
+        # PnL
+        entry = original.filled_price or original.entry_price
+        if original.side == "buy":
+            pnl_pct = ((current_price - entry) / entry) * 100
+        else:
+            pnl_pct = ((entry - current_price) / entry) * 100
+        pnl_usd = original.size_usd * (pnl_pct / 100)
+
+        close_record = {
+            "ticker":     ticker,
+            "open_price": entry,
+            "close_price": current_price,
+            "size_usd":   original.size_usd,
+            "pnl_usd":    round(pnl_usd, 2),
+            "pnl_pct":    round(pnl_pct, 4),
+            "opened_at":  original.created_at,
+            "closed_at":  datetime.now(timezone.utc).isoformat(),
+            "mode":       self.mode.value,
+        }
+        print(f"  PnL: {pnl_pct:+.2f}% (${pnl_usd:+.2f})")
+        del self._open_positions[ticker]
+        self._log_close(close_record)
+        return close_record
+
+    # ------------------------------------------------------------------
+    # Saldo e posições via SDK
+    # ------------------------------------------------------------------
+
+    def get_account_state(self) -> dict:
+        """
+        Obtém saldo e posições abertas diretamente da chain.
+        Só disponível em modo TEST/LIVE.
+        """
+        if self.mode == HLMode.PAPER:
+            return {
+                "mode": "paper",
+                "open_positions": len(self._open_positions),
+                "tickers": list(self._open_positions.keys()),
+            }
+        try:
+            state = self._info.user_state(self.wallet_address)
+            return {
+                "mode":            self.mode.value,
+                "margin_summary":  state.get("marginSummary", {}),
+                "positions":       state.get("assetPositions", []),
+                "open_positions":  len(self._open_positions),
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def get_open_positions(self) -> list[dict]:
+        return [o.to_dict() for o in self._open_positions.values()]
+
+    # ------------------------------------------------------------------
+    # Integração com novo orquestrador (recebe ManagerDecision dicts)
+    # ------------------------------------------------------------------
+
+    def process_manager_decisions(self, manager_output: dict) -> list[HLOrder]:
+        """
+        Processa as decisões do agente gestor após aprovação Telegram.
+        Executa apenas decisões acionáveis (BUY/SELL não rejeitadas).
+
+        Args:
+            manager_output: Output de ManagerAgent.run() após aprovação humana.
+
+        Returns:
+            Lista de HLOrder executadas.
+        """
+        executed: list[HLOrder] = []
+
+        for decision in manager_output.get("actionable", []):
+            ticker    = decision.get("ticker", "?")
+            direction = decision.get("direction", "HOLD")
+            size_usd  = float(decision.get("position_size_usd", 0))
+            entry     = float(decision.get("entry_price", 0))
+            stop      = float(decision.get("stop_loss_price", 0))
+            tp        = float(decision.get("take_profit_price", 0))
+            thesis    = decision.get("thesis", "")
+
+            if direction not in ("BUY", "SELL") or size_usd <= 0 or entry <= 0:
+                continue
+
+            if ticker in self._open_positions:
+                print(f"[HL Executor] {ticker} já tem posição aberta — ignorado")
+                continue
+
+            try:
+                order = self.submit_order(
+                    ticker=ticker,
+                    side=direction.lower(),
+                    size_usd=size_usd,
+                    entry_price=entry,
+                    stop_loss_price=stop,
+                    take_profit_price=tp,
+                    notes=thesis[:100],
+                )
+                executed.append(order)
+            except Exception as e:
+                print(f"[HL Executor] Erro ao executar {ticker}: {e}")
+
+        return executed
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_hl_response(response: dict, label: str) -> None:
+        """Verifica se a resposta do Hyperliquid indica erro."""
+        status = response.get("status", "")
+        if status != "ok":
+            err = response.get("response", response)
+            raise RuntimeError(f"Hyperliquid rejeitou {label}: {err}")
+
+    # ------------------------------------------------------------------
+    # Logging
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _append_log(filename: str, entry: dict) -> None:
+        path = MEMORY_DIR / filename
+        history: list = []
+        if path.exists():
+            try:
+                history = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                history = []
+        history.append(entry)
+        if len(history) > 1000:
+            history = history[-1000:]
+        path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _log_order(self, order: HLOrder) -> None:
+        self._append_log("trades-history.json", order.to_dict())
+
+    def _log_close(self, record: dict) -> None:
+        self._append_log("closed-trades.json", record)
+
+
+# ------------------------------------------------------------------
+# Execução direta (teste/debug — modo PAPER)
+# ------------------------------------------------------------------
+
+if __name__ == "__main__":
+    executor = HyperliquidExecutor(mode=HLMode.PAPER)
+
+    order = executor.submit_order(
+        ticker="BTC",
+        side="buy",
+        size_usd=500.0,
+        entry_price=65_000.0,
+        stop_loss_price=63_050.0,
+        take_profit_price=68_900.0,
+        notes="Teste paper mode",
+    )
+    print(f"\nOrdem criada: {json.dumps(order.to_dict(), indent=2)}")
+
+    state = executor.get_account_state()
+    print(f"\nEstado da conta: {json.dumps(state, indent=2)}")
+
+    close = executor.close_position("BTC", current_price=66_500.0)
+    print(f"\nFecho: {json.dumps(close, indent=2)}")

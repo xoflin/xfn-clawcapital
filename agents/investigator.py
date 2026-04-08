@@ -1,0 +1,415 @@
+"""
+Agent: Investigator
+Uses Gemini 2.5 Flash to synthesise data from multiple sources
+and produce a structured briefing for the manager agent.
+
+Sources consulted per cycle:
+  1. FRED API          → macro (rates, inflation, yield curve)
+  2. CoinGecko         → prices and 24h change (batch, 1 req)
+  3. Alpha Vantage     → RSI + MACD (3 req/ticker — use sparingly)
+  4. CryptoPanic       → headlines and raw sentiment
+  5. Gemini 2.5 Flash  → narrative synthesis + structured briefing
+
+Alpha Vantage quota: 25 req/day.
+  max_av_tickers controls how many tickers receive AV analysis (default 2).
+
+Output: "briefing" dict ready to be consumed by the manager agent.
+"""
+
+import json
+import os
+import time
+from datetime import datetime, timezone
+
+import google.generativeai as genai
+
+from skills.data_fetchers.fred import fetch_macro_snapshot
+from skills.data_fetchers.coingecko import CoinGeckoClient
+from skills.data_fetchers.alpha_vantage import AlphaVantageClient
+from skills.data_fetchers.cryptopanic import fetch_headlines
+from skills.data_fetchers.fear_greed import (
+    fetch_fear_greed_index,
+    fear_greed_signal,
+)
+from skills.data_fetchers.rss_feeds import fetch_rss_feeds, filter_articles_by_keywords
+
+
+# ------------------------------------------------------------------
+# Investigator prompt
+# ------------------------------------------------------------------
+
+_INVESTIGATOR_PROMPT = """\
+You are a senior quantitative analyst specialised in crypto assets.
+You have access to the following real-time data:
+
+=== MACRO CONTEXT (FRED) ===
+{macro_context}
+
+=== MARKET DATA (CoinGecko) ===
+{market_data}
+
+=== TECHNICAL INDICATORS (Alpha Vantage) ===
+{technical_data}
+
+=== SOCIAL SENTIMENT PILLAR ===
+
+--- CryptoPanic Headlines ---
+{news_data}
+
+--- Fear & Greed Index (Alternative.me) ---
+{fear_greed_data}
+
+--- RSS News Feeds ---
+{rss_data}
+
+---
+Based on this data, produce a structured JSON briefing with EXACTLY this format:
+
+{{
+  "macro_summary": "<2-3 sentences on the macro environment and its impact on crypto>",
+  "market_summary": "<2-3 sentences on current market state and momentum>",
+  "technical_summary": "<2-3 sentences on key technical indicators>",
+  "sentiment_summary": "<1-2 sentences on market sentiment>",
+  "risk_factors": ["<risk 1>", "<risk 2>", "<risk 3>"],
+  "opportunities": ["<opportunity 1>", "<opportunity 2>"],
+  "overall_bias": "<Bullish|Neutral|Bearish>",
+  "bias_confidence": <0.0 to 1.0>,
+  "assets_ranked": [
+    {{
+      "ticker": "<TICKER>",
+      "thesis": "<investment thesis in 1 sentence>",
+      "technical_score": <-1.0 to 1.0>,
+      "sentiment_score": <-1.0 to 1.0>,
+      "priority": <1, 2 or 3 — 1 is highest priority>
+    }}
+  ],
+  "investigator_notes": "<any additional observations relevant to the manager>"
+}}
+
+Respond with JSON ONLY. No additional text, no markdown, no explanations.
+"""
+
+
+# ------------------------------------------------------------------
+# Investigator Agent
+# ------------------------------------------------------------------
+
+class InvestigatorAgent:
+    """
+    Collects data from all sources and produces a structured briefing
+    for the manager agent to make the final decision.
+
+    Args:
+        gemini_api_key:      Gemini API key (Flash).
+        cryptopanic_token:   CryptoPanic token.
+        coingecko_api_key:   CoinGecko key (optional — free without key).
+        alpha_vantage_key:   Alpha Vantage key (free, 25 req/day).
+        fred_api_key:        FRED API key (free).
+        max_av_tickers:      Max tickers with Alpha Vantage analysis (default 2).
+    """
+
+    def __init__(
+        self,
+        gemini_api_key: str,
+        cryptopanic_token: str,
+        coingecko_api_key: str | None = None,
+        alpha_vantage_key: str | None = None,
+        fred_api_key: str | None = None,
+        max_av_tickers: int = 2,
+    ):
+        self.gemini_api_key = gemini_api_key
+        self.cryptopanic_token = cryptopanic_token
+        self.alpha_vantage_key = alpha_vantage_key
+        self.fred_api_key = fred_api_key
+        self.max_av_tickers = max_av_tickers
+
+        self._coingecko = CoinGeckoClient(api_key=coingecko_api_key)
+
+        genai.configure(api_key=gemini_api_key)
+        self._model = genai.GenerativeModel("gemini-2.5-flash-preview-04-17")
+
+    # ------------------------------------------------------------------
+    # Data collection
+    # ------------------------------------------------------------------
+
+    def _collect_macro(self) -> str:
+        """Fetches FRED macro snapshot. Returns formatted string for the prompt."""
+        if not self.fred_api_key:
+            return "FRED API not configured — macro data unavailable."
+        try:
+            snapshot = fetch_macro_snapshot(api_key=self.fred_api_key)
+            lines = []
+            for series_id, data in snapshot["indicators"].items():
+                label = data.get("label", series_id)
+                val   = data.get("latest_value")
+                date  = data.get("latest_date", "")
+                if val is not None:
+                    lines.append(f"  {label}: {val:.2f} ({date})")
+                else:
+                    lines.append(f"  {label}: N/A")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Error fetching FRED data: {e}"
+
+    def _collect_market(self, tickers: list[str]) -> str:
+        """CoinGecko batch snapshot. Returns formatted string."""
+        try:
+            snapshots = self._coingecko.get_batch_snapshots(tickers)
+            lines = []
+            for s in snapshots:
+                ticker = s.get("ticker", "?")
+                price  = s.get("price", 0)
+                chg    = s.get("change_24h_pct", 0)
+                vol    = s.get("volume_24h", 0)
+                mcap   = s.get("market_cap", 0)
+                lines.append(
+                    f"  {ticker}: ${price:,.4f} | 24h: {chg:+.2f}% | "
+                    f"Vol: ${vol:,.0f} | MCap: ${mcap:,.0f}"
+                )
+            return "\n".join(lines) if lines else "Market data unavailable."
+        except Exception as e:
+            return f"CoinGecko error: {e}"
+
+    def _collect_technical(self, tickers: list[str]) -> str:
+        """RSI + MACD via Alpha Vantage (limited to max_av_tickers)."""
+        if not self.alpha_vantage_key:
+            return "Alpha Vantage not configured — technical indicators unavailable."
+
+        av = AlphaVantageClient(api_key=self.alpha_vantage_key)
+        lines = []
+        for ticker in tickers[:self.max_av_tickers]:
+            try:
+                report = av.get_technical_report(ticker)
+                rsi    = report.get("rsi_latest") or {}
+                macd   = report.get("macd_latest") or {}
+                signal = report.get("signal", {})
+                lines.append(
+                    f"  {ticker}: RSI={rsi.get('rsi', 'N/A')} | "
+                    f"MACD hist={macd.get('histogram', 'N/A')} | "
+                    f"Signal: {signal.get('direction', 'N/A')} — {signal.get('reason', '')}"
+                )
+                time.sleep(12)  # 5 req/min on free plan → ~12s between 3-req reports
+            except Exception as e:
+                lines.append(f"  {ticker}: AV error — {e}")
+
+        if not lines:
+            return "No tickers with technical analysis available."
+        if len(tickers) > self.max_av_tickers:
+            skipped = tickers[self.max_av_tickers:]
+            lines.append(f"  (skipped due to quota: {', '.join(skipped)})")
+        return "\n".join(lines)
+
+    def _collect_news(self, tickers: list[str]) -> str:
+        """CryptoPanic headlines formatted for the prompt."""
+        try:
+            headlines = fetch_headlines(
+                auth_token=self.cryptopanic_token,
+                currencies=tickers,
+                max_results=15,
+            )
+            if not headlines:
+                return "No headlines available."
+            lines = []
+            for h in headlines[:15]:
+                title   = h.get("title", "")
+                pub     = h.get("published_at", "")[:10]
+                bullish = h.get("bullish_votes", 0)
+                bearish = h.get("bearish_votes", 0)
+                lines.append(f"  [{pub}] {title} (↑{bullish} ↓{bearish})")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"CryptoPanic error: {e}"
+
+    def _collect_fear_greed(self) -> str:
+        """Fetches Fear & Greed Index from Alternative.me."""
+        try:
+            data = fetch_fear_greed_index(limit=7)
+            if "error" in data:
+                return f"Fear & Greed unavailable: {data['error']}"
+
+            current = data.get("current", {})
+            value = current.get("value", 50)
+            classification = current.get("classification", "Neutral")
+            signal = fear_greed_signal(value)
+
+            # Build history trend
+            history = data.get("history", [])[:3]
+            trend_str = " ← ".join([str(h.get("value", 50)) for h in reversed(history)])
+
+            return (
+                f"  Current: {value} ({classification})\n"
+                f"  Signal: {signal:+.2f}\n"
+                f"  7-day trend: {trend_str}"
+            )
+        except Exception as e:
+            return f"Fear & Greed error: {e}"
+
+    def _collect_rss_feeds(self, tickers: list[str]) -> str:
+        """Fetches and filters RSS feeds by crypto keywords."""
+        try:
+            result = fetch_rss_feeds(max_per_feed=5)
+            articles = result.get("articles", [])
+
+            # Filter by crypto keywords or tickers
+            keywords = tickers + ["crypto", "bitcoin", "ethereum", "defi", "trading"]
+            filtered = filter_articles_by_keywords(articles, keywords)[:10]
+
+            if not filtered:
+                return "No relevant RSS articles found."
+
+            lines = []
+            for article in filtered:
+                source = article.get("source", "unknown").upper()
+                title = article.get("title", "")[:80]
+                pub = article.get("published_at", "")[:10]
+                lines.append(f"  [{source}] {title} ({pub})")
+
+            # Add feed status
+            feed_status = result.get("feed_status", {})
+            status_summary = " | ".join(
+                [
+                    f"{name}: {data.get('article_count', 0)} articles"
+                    for name, data in feed_status.items()
+                    if data.get("status") == "ok"
+                ]
+            )
+
+            return "\n".join(lines) + f"\n\n  Feed status: {status_summary}"
+        except Exception as e:
+            return f"RSS feeds error: {e}"
+
+    # ------------------------------------------------------------------
+    # Synthesis with Gemini Flash
+    # ------------------------------------------------------------------
+
+    def _synthesize(
+        self,
+        macro: str,
+        market: str,
+        technical: str,
+        news: str,
+        fear_greed: str,
+        rss_feeds: str,
+    ) -> dict:
+        """Calls Gemini 2.5 Flash and returns the structured briefing."""
+        prompt = _INVESTIGATOR_PROMPT.format(
+            macro_context=macro,
+            market_data=market,
+            technical_data=technical,
+            news_data=news,
+            fear_greed_data=fear_greed,
+            rss_data=rss_feeds,
+        )
+
+        response = self._model.generate_content(prompt)
+        raw = response.text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        return json.loads(raw)
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    def run(self, watchlist: list[str]) -> dict:
+        """
+        Runs the full investigation cycle for the given watchlist.
+
+        Args:
+            watchlist: List of tickers (e.g. ["BTC", "ETH", "SOL"]).
+
+        Returns:
+            {
+              "agent": "investigator",
+              "timestamp": str,
+              "watchlist": list[str],
+              "raw_data": { macro, market, technical, news },
+              "briefing": { ... }   ← Gemini Flash output
+            }
+        """
+        print(f"[Investigator] Cycle started for {watchlist}")
+        ts = datetime.now(timezone.utc).isoformat()
+
+        print("[Investigator] Fetching macro data (FRED)...")
+        macro = self._collect_macro()
+
+        print("[Investigator] Fetching market data (CoinGecko)...")
+        market = self._collect_market(watchlist)
+        time.sleep(1)
+
+        print(f"[Investigator] Fetching technical indicators "
+              f"(AV, max {self.max_av_tickers} tickers)...")
+        technical = self._collect_technical(watchlist)
+
+        print("[Investigator] Fetching news (CryptoPanic)...")
+        news = self._collect_news(watchlist)
+
+        print("[Investigator] Fetching Fear & Greed Index (Alternative.me)...")
+        fear_greed = self._collect_fear_greed()
+
+        print("[Investigator] Fetching RSS feeds...")
+        rss_feeds = self._collect_rss_feeds(watchlist)
+
+        print("[Investigator] Synthesising with Gemini 2.5 Flash...")
+        try:
+            briefing = self._synthesize(macro, market, technical, news, fear_greed, rss_feeds)
+        except json.JSONDecodeError as e:
+            print(f"[Investigator] WARNING — invalid JSON from Gemini: {e}. Using fallback.")
+            briefing = {
+                "macro_summary":      macro[:300],
+                "market_summary":     market[:300],
+                "technical_summary":  technical[:300],
+                "sentiment_summary":  f"{news[:100]} | FnG: {fear_greed[:100]}",
+                "risk_factors":       [],
+                "opportunities":      [],
+                "overall_bias":       "Neutral",
+                "bias_confidence":    0.0,
+                "assets_ranked":      [],
+                "investigator_notes": "Automatic synthesis failed — raw data included.",
+            }
+
+        print(f"[Investigator] Briefing generated — Bias: {briefing.get('overall_bias')} "
+              f"(conf={briefing.get('bias_confidence', 0):.2f})")
+
+        return {
+            "agent":     "investigator",
+            "timestamp": ts,
+            "watchlist": watchlist,
+            "raw_data": {
+                "macro":      macro,
+                "market":     market,
+                "technical":  technical,
+                "news":       news,
+                "fear_greed": fear_greed,
+                "rss_feeds":  rss_feeds,
+            },
+            "briefing": briefing,
+        }
+
+
+# ------------------------------------------------------------------
+# Direct execution (test/debug)
+# ------------------------------------------------------------------
+
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    agent = InvestigatorAgent(
+        gemini_api_key=os.environ["GEMINI_API_KEY"],
+        cryptopanic_token=os.environ["CRYPTOPANIC_TOKEN"],
+        coingecko_api_key=os.environ.get("COINGECKO_API_KEY"),
+        alpha_vantage_key=os.environ.get("ALPHA_VANTAGE_API_KEY"),
+        fred_api_key=os.environ.get("FRED_API_KEY"),
+        max_av_tickers=2,
+    )
+
+    result = agent.run(watchlist=["BTC", "ETH", "SOL"])
+    print("\n=== BRIEFING ===")
+    print(json.dumps(result["briefing"], indent=2, ensure_ascii=False))

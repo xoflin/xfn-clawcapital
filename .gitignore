@@ -1,0 +1,20 @@
+# Claude Code — guidance & memory (not for version control)
+CLAUDE.md
+.claude/
+memory/*.json
+
+# Environment & secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+
+# macOS
+.DS_Store
