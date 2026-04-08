@@ -40,9 +40,13 @@ class QuotaTracker:
     def _load(self) -> dict:
         if QUOTA_FILE.exists():
             try:
-                return json.loads(QUOTA_FILE.read_text(encoding="utf-8"))
+                data = json.loads(QUOTA_FILE.read_text(encoding="utf-8"))
+                # Validate structure — if corrupt, reset (safe side)
+                if isinstance(data.get("counts"), dict) and isinstance(data.get("date"), str):
+                    return data
+                print("[QuotaTracker] WARNING — corrupt quota file, resetting to zero")
             except Exception:
-                pass
+                print("[QuotaTracker] WARNING — could not read quota file, resetting to zero")
         return {"date": date.today().isoformat(), "counts": {}}
 
     def _save(self) -> None:
@@ -73,14 +77,21 @@ class QuotaTracker:
             return True, ""  # Unknown service — no limit enforced
 
         current = self._state["counts"].get(service, 0)
-        threshold = int(limit * SAFETY_PCT)
 
+        # Hard cap — never exceed 100% regardless of any bug
+        if current >= limit:
+            return False, (
+                f"{service} HARD LIMIT reached ({current}/{limit}) — "
+                f"no more calls allowed today"
+            )
+
+        # Safety threshold — stop early to leave headroom for manual use
+        threshold = int(limit * SAFETY_PCT)
         if current >= threshold:
             remaining = limit - current
             return False, (
-                f"{service} daily quota at safety limit "
-                f"({current}/{limit} used, {remaining} remaining — "
-                f"threshold: {threshold})"
+                f"{service} safety threshold reached "
+                f"({current}/{limit} used, {remaining} reserved)"
             )
 
         self._state["counts"][service] = current + 1

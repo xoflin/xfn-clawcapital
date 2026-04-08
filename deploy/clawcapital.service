@@ -10,7 +10,9 @@ WorkingDirectory=/home/ubuntu/xfn-clawcapital
 EnvironmentFile=/home/ubuntu/xfn-clawcapital/.env
 ExecStart=/home/ubuntu/xfn-clawcapital/.venv/bin/python main.py --loop 3600
 Restart=on-failure
-RestartSec=60
+RestartSec=120
+StartLimitIntervalSec=600
+StartLimitBurst=3
 StandardOutput=append:/var/log/clawcapital.log
 StandardError=append:/var/log/clawcapital.log
 
