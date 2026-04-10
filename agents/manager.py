@@ -354,6 +354,7 @@ class ManagerAgent:
 
         try:
             raw_decisions = self._decide(investigator_output, market_prices, open_positions)
+            print(f"[Manager] DEBUG — Raw Gemini response: {json.dumps(raw_decisions, indent=2, ensure_ascii=False)}")
         except Exception as e:
             print(f"[Manager] ERROR — Gemini Pro failed: {e}")
             return {
