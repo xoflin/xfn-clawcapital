@@ -31,6 +31,7 @@ def fetch_news(
     tickers: list[str] | None = None,
     max_results: int = DEFAULT_MAX,
     timeout: int = 10,
+    api_key: str | None = None,
 ) -> list[dict]:
     """
     Fetches latest crypto news from CryptoCompare.
@@ -59,9 +60,12 @@ def fetch_news(
     # which can return a dict instead of a list and cause slicing errors).
     # Ticker filtering is done client-side after fetching.
     params: dict = {"lang": "EN", "sortOrder": "latest"}
+    headers: dict = {}
+    if api_key:
+        headers["authorization"] = f"Apikey {api_key}"
 
     try:
-        resp = requests.get(CRYPTOCOMPARE_URL, params=params, timeout=timeout)
+        resp = requests.get(CRYPTOCOMPARE_URL, params=params, headers=headers, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:

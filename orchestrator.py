@@ -79,10 +79,11 @@ class Orchestrator:
     def __init__(
         self,
         gemini_api_key: str,
-        cryptopanic_token: str | None = None,
+        cryptopanic_token: str | None = None,   # kept for backwards compat, unused
         coingecko_api_key: str | None = None,
         alpha_vantage_key: str | None = None,
         fred_api_key: str | None = None,
+        cryptocompare_api_key: str | None = None,
         telegram_bot_token: str | None = None,
         telegram_chat_id: str | None = None,
         hl_wallet_address: str | None = None,
@@ -107,10 +108,10 @@ class Orchestrator:
 
         self.investigator = InvestigatorAgent(
             gemini_api_key=gemini_api_key,
-            cryptopanic_token=cryptopanic_token,
             coingecko_api_key=coingecko_api_key,
             alpha_vantage_key=alpha_vantage_key,
             fred_api_key=fred_api_key,
+            cryptocompare_api_key=cryptocompare_api_key,
             max_av_tickers=max_av_tickers,
         )
 
@@ -151,7 +152,7 @@ class Orchestrator:
             checks["coingecko"] = False
 
         try:
-            import google.generativeai  # noqa: F401
+            from google import genai  # noqa: F401
             checks["gemini"] = True
         except Exception:
             checks["gemini"] = False
@@ -317,11 +318,8 @@ class Orchestrator:
         effective_capital = self.capital
         real_balance = self.executor.get_available_balance()
         if real_balance is not None:
-            if real_balance < effective_capital * 0.95:
-                effective_capital = real_balance
-                print(f"  Balance      ⚠  ${real_balance:,.2f} (below configured ${self.capital:,.2f} — using real)")
-            else:
-                print(f"  Balance      ✓  ${real_balance:,.2f}")
+            effective_capital = real_balance
+            print(f"  Balance      ✓  ${real_balance:,.2f}")
             results["real_balance"] = real_balance
 
         trades_path = MEMORY_DIR / "trades-history.json"

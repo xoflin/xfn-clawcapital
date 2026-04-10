@@ -190,8 +190,6 @@ class HyperliquidExecutor:
         )
         info = Info(base_url=base_url, skip_ws=True, meta=meta_resp, spot_meta=spot_meta_fixed)
 
-        env = "TESTNET" if testnet else "MAINNET"
-        print(f"[HL Executor] Ligado ao Hyperliquid {env} — wallet: {wallet_address[:10]}...")
         return exchange, info
 
     # ------------------------------------------------------------------
@@ -241,8 +239,7 @@ class HyperliquidExecutor:
                 continue
 
         if open_positions:
-            print(f"[HL Executor] Restored {len(open_positions)} open position(s): "
-                  f"{list(open_positions.keys())}")
+            print(f"  Positions    ↺  {len(open_positions)} restored: {list(open_positions.keys())}")
         return open_positions
 
     # ------------------------------------------------------------------
@@ -304,10 +301,6 @@ class HyperliquidExecutor:
             notes=notes,
         )
 
-        print(f"\n[HL Executor] Nova ordem #{order.id}")
-        print(f"  {side.upper()} {size_units:.6f} {ticker} "
-              f"@ ${entry_price:,.4f} ({self.mode.value})")
-        print(f"  SL: ${stop_loss_price:,.4f} | TP: ${take_profit_price:,.4f}")
 
         if self.mode == HLMode.PAPER:
             self._fill_paper(order)

@@ -48,6 +48,7 @@ def build_orchestrator(skip_telegram: bool = False) -> Orchestrator:
         coingecko_api_key=os.environ.get("COINGECKO_API_KEY"),
         alpha_vantage_key=os.environ.get("ALPHA_VANTAGE_API_KEY"),
         fred_api_key=os.environ.get("FRED_API_KEY"),
+        cryptocompare_api_key=os.environ.get("CRYPTOCOMPARE_API_KEY"),
         telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN"),
         telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID"),
         hl_wallet_address=os.environ.get("HL_WALLET_ADDRESS"),
@@ -130,10 +131,6 @@ def main():
         help="Skip connectivity heartbeat (debug)",
     )
     args = parser.parse_args()
-
-    print("=" * 60)
-    print("  ClawCapital — Autonomous Quantitative Portfolio Manager")
-    print("=" * 60)
 
     orc = build_orchestrator(skip_telegram=args.skip_telegram)
 

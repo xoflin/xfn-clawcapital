@@ -10,7 +10,7 @@ Output: dict with sentiment, confidence, key_drivers, summary,
 import json
 import re
 
-import google.generativeai as genai
+from google import genai
 
 
 SENTIMENT_PROMPT = """
@@ -55,13 +55,15 @@ def analyse(api_key: str, headlines: list[dict]) -> dict:
     Raises:
         json.JSONDecodeError: If Gemini does not return valid JSON.
     """
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    client = genai.Client(api_key=api_key)
 
     headlines_json_str = json.dumps(headlines, ensure_ascii=False, indent=2)
     prompt = SENTIMENT_PROMPT.format(headlines_json=headlines_json_str)
 
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+    )
     raw_text = response.text.strip()
 
     raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)

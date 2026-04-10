@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-import google.generativeai as genai
+from google import genai
 
 from risk.calculator import RiskCalculator, RiskConfig, SizingMethod
 from risk.quota import QuotaTracker
@@ -171,8 +171,7 @@ class ManagerAgent:
         self.min_confidence = min_confidence
         self.max_positions = max_positions
 
-        genai.configure(api_key=gemini_api_key)
-        self._model = genai.GenerativeModel(_MODEL_NAME)
+        self._genai = genai.Client(api_key=gemini_api_key)
         self._quota = QuotaTracker()
 
         self._risk = RiskCalculator(RiskConfig(
@@ -213,7 +212,10 @@ class ManagerAgent:
         if not allowed:
             raise RuntimeError(f"Gemini Pro quota: {reason}")
 
-        response = self._model.generate_content(prompt)
+        response = self._genai.models.generate_content(
+            model=_MODEL_NAME,
+            contents=prompt,
+        )
         raw = response.text.strip()
 
         if raw.startswith("```"):

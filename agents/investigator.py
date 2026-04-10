@@ -22,7 +22,7 @@ import os
 import time
 from datetime import datetime, timezone
 
-import google.generativeai as genai
+from google import genai
 
 from skills.data_fetchers.fred import fetch_macro_snapshot
 from skills.data_fetchers.coingecko import CoinGeckoClient
@@ -113,34 +113,32 @@ class InvestigatorAgent:
     for the manager agent to make the final decision.
 
     Args:
-        gemini_api_key:      Gemini API key (Flash).
-        cryptopanic_token:   CryptoPanic token.
-        coingecko_api_key:   CoinGecko key (optional — free without key).
-        alpha_vantage_key:   Alpha Vantage key (free, 25 req/day).
-        fred_api_key:        FRED API key (free).
-        max_av_tickers:      Max tickers with Alpha Vantage analysis (default 2).
+        gemini_api_key:        Gemini API key (Flash).
+        coingecko_api_key:     CoinGecko key (optional — free without key).
+        alpha_vantage_key:     Alpha Vantage key (free, 25 req/day).
+        fred_api_key:          FRED API key (free).
+        cryptocompare_api_key: CryptoCompare API key (optional — higher rate limit).
+        max_av_tickers:        Max tickers with Alpha Vantage analysis (default 2).
     """
 
     def __init__(
         self,
         gemini_api_key: str,
-        cryptopanic_token: str | None = None,
+        cryptopanic_token: str | None = None,   # kept for backwards compat, unused
         coingecko_api_key: str | None = None,
         alpha_vantage_key: str | None = None,
         fred_api_key: str | None = None,
+        cryptocompare_api_key: str | None = None,
         max_av_tickers: int = 2,
     ):
-        self.gemini_api_key = gemini_api_key
-        self.cryptopanic_token = cryptopanic_token
-        self.alpha_vantage_key = alpha_vantage_key
-        self.fred_api_key = fred_api_key
-        self.max_av_tickers = max_av_tickers
+        self.alpha_vantage_key      = alpha_vantage_key
+        self.fred_api_key           = fred_api_key
+        self.cryptocompare_api_key  = cryptocompare_api_key
+        self.max_av_tickers         = max_av_tickers
 
         self._coingecko = CoinGeckoClient(api_key=coingecko_api_key)
-
-        genai.configure(api_key=gemini_api_key)
-        self._model = genai.GenerativeModel(_MODEL_NAME)
-        self._quota = QuotaTracker()
+        self._genai     = genai.Client(api_key=gemini_api_key)
+        self._quota     = QuotaTracker()
 
     # ------------------------------------------------------------------
     # Data collection
@@ -167,6 +165,11 @@ class InvestigatorAgent:
 
     def _collect_market(self, tickers: list[str]) -> str:
         """CoinGecko batch snapshot. Returns formatted string."""
+        def _fmt_price(p: float) -> str:
+            if p >= 1000:   return f"${p:,.0f}"
+            if p >= 1:      return f"${p:,.2f}"
+            return f"${p:,.4f}"
+
         try:
             snapshots = self._coingecko.get_batch_snapshots(tickers)
             lines = []
@@ -177,7 +180,7 @@ class InvestigatorAgent:
                 vol    = s.get("volume_24h", 0)
                 mcap   = s.get("market_cap", 0)
                 lines.append(
-                    f"  {ticker}: ${price:,.4f} | 24h: {chg:+.2f}% | "
+                    f"  {ticker}: {_fmt_price(price)} | 24h: {chg:+.2f}% | "
                     f"Vol: ${vol:,.0f} | MCap: ${mcap:,.0f}"
                 )
             return "\n".join(lines) if lines else "Market data unavailable."
@@ -226,9 +229,13 @@ class InvestigatorAgent:
         return "\n".join(lines)
 
     def _collect_news(self, tickers: list[str]) -> str:
-        """CryptoCompare News headlines formatted for the prompt (free, no key required)."""
+        """CryptoCompare News headlines (API key optional — higher rate limit when set)."""
         try:
-            articles = fetch_cc_news(tickers=tickers, max_results=20)
+            articles = fetch_cc_news(
+                tickers=tickers,
+                max_results=20,
+                api_key=self.cryptocompare_api_key,
+            )
             return cc_format(articles, max_items=15)
         except Exception as e:
             return f"CryptoCompare News error: {e}"
@@ -368,7 +375,10 @@ class InvestigatorAgent:
         if not allowed:
             raise RuntimeError(f"Gemini Flash quota: {reason}")
 
-        response = self._model.generate_content(prompt)
+        response = self._genai.models.generate_content(
+            model=_MODEL_NAME,
+            contents=prompt,
+        )
         raw = response.text.strip()
 
         if raw.startswith("```"):
@@ -400,7 +410,8 @@ class InvestigatorAgent:
             }
         """
         ts = datetime.now(timezone.utc).isoformat()
-        W  = 14  # label column width
+        LW = 14   # label column width
+        DW = 62   # data column width
 
         # ── helpers ──────────────────────────────────────────────────
         _BAD = ("error", "unavailable", "not configured", "skipped —", "av error")
@@ -409,14 +420,17 @@ class InvestigatorAgent:
             return not any(b in data.lower() for b in _BAD)
 
         def _line(label: str, data: str, summary: str | None = None) -> str:
-            s = (summary or data.strip().split("\n")[0].lstrip())[:76]
-            return f"  {label:<{W}}{'✓' if _ok(data) else '✗'}  {s}"
+            icon = "✓" if _ok(data) else "✗"
+            s    = (summary or data.strip().split("\n")[0].lstrip())[:DW]
+            return f"  {label:<{LW}}{icon} │ {s}"
 
         print(f"[Investigator] {' · '.join(watchlist)}")
 
         # ── 1. FRED ──────────────────────────────────────────────────
         macro = self._collect_macro()
-        print(_line("FRED", macro))
+        # Show only first indicator (most relevant)
+        macro_summary = macro.strip().split("\n")[0].lstrip()
+        print(_line("FRED", macro, macro_summary))
 
         # ── 2. CoinGecko ─────────────────────────────────────────────
         market = self._collect_market(watchlist)
@@ -425,10 +439,11 @@ class InvestigatorAgent:
         for _l in market.strip().split("\n"):
             segs = [s.strip() for s in _l.split("|")]
             if len(segs) >= 2:
+                # "  BTC: $73,006 | 24h: +0.61% | ..." → "BTC $73,006 +0.61%"
                 t = segs[0].lstrip().replace(": $", " $").replace(":", "").strip()
                 c = segs[1].replace("24h:", "").strip()
                 cg_parts.append(f"{t} {c}")
-        print(_line("CoinGecko", market, " | ".join(cg_parts) or None))
+        print(_line("CoinGecko", market, "  ".join(cg_parts) or None))
 
         # ── 3. Alpha Vantage ─────────────────────────────────────────
         technical = self._collect_technical(watchlist)
@@ -443,7 +458,7 @@ class InvestigatorAgent:
                 av_parts.append(f"{_t} {_rsi} {_sig}".strip())
             elif "skipped" in _l or "error" in _l.lower():
                 av_parts.append(_l[:50])
-        print(_line("AlphaVantage", technical, " | ".join(av_parts) or None))
+        print(_line("AlphaVantage", technical, "  ".join(av_parts) or None))
 
         # ── 4. News ──────────────────────────────────────────────────
         news = self._collect_news(watchlist)
@@ -499,7 +514,7 @@ class InvestigatorAgent:
                 "investigator_notes": "Automatic synthesis failed — raw data included.",
             }
 
-        print(f"  {'Gemini Flash':<{W}}{'✓' if _gem_ok else '✗'}  {gem_summary}")
+        print(f"  {'Gemini Flash':<{LW}}{'✓' if _gem_ok else '✗'} │ {gem_summary}")
 
         return {
             "agent":     "investigator",
