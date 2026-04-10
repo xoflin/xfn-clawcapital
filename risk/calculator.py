@@ -111,9 +111,15 @@ class RiskCalculator:
         current_open_positions: int = 0,
         current_daily_drawdown_pct: float = 0.0,
         current_total_drawdown_pct: float = 0.0,
+        is_cold_start: bool = False,
     ) -> PositionResult:
         """
         Computes position size and validates risk rules.
+
+        Args:
+            is_cold_start: True when there is no trade history.
+                           Applies conservative sizing (half Kelly, half risk cap)
+                           to protect capital on the very first position.
 
         Rules checked:
         - Minimum agent confidence
@@ -153,22 +159,37 @@ class RiskCalculator:
             )
 
         # ---- Position sizing ----
+        # Ponto 2: Cold start — sem histórico de trades, sizing conservador
+        # Usa metade da kelly_fraction e metade do max_risk para proteger capital
+        # na primeira posição onde não há win rate histórico para calibrar Kelly.
+        effective_kelly_fraction = (
+            self.config.kelly_fraction * 0.5 if is_cold_start
+            else self.config.kelly_fraction
+        )
+        effective_max_risk_pct = (
+            self.config.max_risk_per_trade_pct * 0.5 if is_cold_start
+            else self.config.max_risk_per_trade_pct
+        )
+        if is_cold_start:
+            print(f"  [RiskCalc] Cold start detected — using conservative sizing "
+                  f"(kelly×0.5, risk_pct×0.5 → {effective_max_risk_pct:.2f}%)")
+
         stop_loss_pct = abs((entry_price - stop_loss_price) / entry_price) * 100
-        max_risk_usd  = ff_skill.risk_amount(capital, self.config.max_risk_per_trade_pct)
+        max_risk_usd  = ff_skill.risk_amount(capital, effective_max_risk_pct)
 
         if method == SizingMethod.FIXED_FRACTIONAL:
             risk_usd = max_risk_usd
 
         elif method == SizingMethod.KELLY:
             if all(v is not None for v in [win_rate, avg_win_pct, avg_loss_pct]):
-                frac     = kelly_skill.fractional_kelly(win_rate, avg_win_pct, avg_loss_pct, self.config.kelly_fraction)
+                frac     = kelly_skill.fractional_kelly(win_rate, avg_win_pct, avg_loss_pct, effective_kelly_fraction)
                 risk_usd = capital * frac
             else:
                 risk_usd = max_risk_usd
 
         else:  # HYBRID
             if all(v is not None for v in [win_rate, avg_win_pct, avg_loss_pct]):
-                frac     = kelly_skill.fractional_kelly(win_rate, avg_win_pct, avg_loss_pct, self.config.kelly_fraction)
+                frac     = kelly_skill.fractional_kelly(win_rate, avg_win_pct, avg_loss_pct, effective_kelly_fraction)
                 risk_usd = min(capital * frac, max_risk_usd)
             else:
                 risk_usd = max_risk_usd

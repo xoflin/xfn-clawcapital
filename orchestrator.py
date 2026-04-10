@@ -314,6 +314,40 @@ class Orchestrator:
                 return results
             print("[Orchestrator] Heartbeat OK")
 
+        # ── 1b. Cold-start checks (balance + reconciliation) ─────────
+        # Ponto 1: Verificar saldo real disponível na exchange
+        effective_capital = self.capital
+        real_balance = self.executor.get_available_balance()
+        if real_balance is not None:
+            if real_balance < effective_capital * 0.95:
+                print(f"[Orchestrator] WARNING — Real balance ${real_balance:,.2f} is lower "
+                      f"than configured capital ${effective_capital:,.2f}. "
+                      f"Using real balance for sizing.")
+                effective_capital = real_balance
+            else:
+                print(f"[Orchestrator] Balance OK — ${real_balance:,.2f} available")
+            results["real_balance"] = real_balance
+
+        # Ponto 2: Detectar cold start (sem histórico de trades)
+        trades_path = MEMORY_DIR / "trades-history.json"
+        is_cold_start = not trades_path.exists() or trades_path.stat().st_size < 10
+        if is_cold_start:
+            print("[Orchestrator] Cold start detected — no trade history. "
+                  "Conservative sizing will apply.")
+        results["is_cold_start"] = is_cold_start
+
+        # Ponto 3: Reconciliar posições com a exchange
+        unknown_positions = self.executor.reconcile_positions()
+        if unknown_positions:
+            tickers = [p.get("coin") for p in unknown_positions]
+            print(f"[Orchestrator] WARNING — {len(unknown_positions)} position(s) found on "
+                  f"exchange NOT in local state: {tickers}")
+            print("[Orchestrator] These positions will NOT be managed by the bot until "
+                  "they are recorded in trades-history.json.")
+            results["untracked_positions"] = unknown_positions
+        elif real_balance is not None:
+            print("[Orchestrator] Positions reconciled — exchange matches local state")
+
         # ── 2. Investigator ──────────────────────────────────────────
         print("\n[Orchestrator] Running investigator agent...")
         try:
@@ -355,7 +389,7 @@ class Orchestrator:
               f"total: {self._drawdown.total_drawdown_pct:.2f}%")
 
         # ── 4. Manager ───────────────────────────────────────────────
-        print("\n[Orchestrator] Running manager agent (Gemini Pro)...")
+        print("\n[Orchestrator] Running manager agent (Gemini Flash)...")
         open_positions = len(self.executor.get_open_positions())
         try:
             manager_output = self.manager.run(
@@ -364,6 +398,8 @@ class Orchestrator:
                 open_positions=open_positions,
                 daily_drawdown_pct=self._drawdown.daily_drawdown_pct,
                 total_drawdown_pct=self._drawdown.total_drawdown_pct,
+                effective_capital=effective_capital,
+                is_cold_start=is_cold_start,
             )
             actionable = manager_output.get("actionable", [])
             results["manager"] = {

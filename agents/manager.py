@@ -239,7 +239,10 @@ class ManagerAgent:
         open_positions: int,
         daily_drawdown_pct: float = 0.0,
         total_drawdown_pct: float = 0.0,
+        capital: float | None = None,
+        is_cold_start: bool = False,
     ) -> list[ManagerDecision]:
+        capital_to_use  = capital if capital is not None else self.capital
         briefing        = investigator_output.get("briefing", {})
         bias_confidence = float(briefing.get("bias_confidence", 0.0))
         macro_summary   = briefing.get("macro_summary", "")
@@ -283,7 +286,7 @@ class ManagerAgent:
             # RiskCalculator: sizing + veto rules (real drawdown values)
             pos = self._risk.calculate_position(
                 ticker=ticker,
-                capital=self.capital,
+                capital=capital_to_use,
                 entry_price=entry,
                 stop_loss_price=stop,
                 confidence=round(confidence, 4),
@@ -292,6 +295,7 @@ class ManagerAgent:
                 current_open_positions=open_positions,
                 current_daily_drawdown_pct=daily_drawdown_pct,
                 current_total_drawdown_pct=total_drawdown_pct,
+                is_cold_start=is_cold_start,
             )
 
             if not pos.approved:
@@ -331,6 +335,8 @@ class ManagerAgent:
         open_positions: int = 0,
         daily_drawdown_pct: float = 0.0,
         total_drawdown_pct: float = 0.0,
+        effective_capital: float | None = None,
+        is_cold_start: bool = False,
     ) -> dict:
         """
         Makes investment decisions based on the investigator's output.
@@ -339,23 +345,20 @@ class ManagerAgent:
             investigator_output: Full output from InvestigatorAgent.run().
             market_prices:       {ticker: current_price} for each asset.
             open_positions:      Number of currently open positions.
-
-        Returns:
-            {
-              "agent": "manager",
-              "timestamp": str,
-              "gemini_model": str,
-              "decisions": [ManagerDecision.to_dict(), ...],
-              "actionable": [ManagerDecision, ...]  ← objects for orchestrator
-            }
+            effective_capital:   Real balance from exchange (overrides self.capital if set).
+            is_cold_start:       True when no trade history exists — triggers conservative sizing.
         """
-        print("[Manager] Analysing briefing with Gemini 2.5 Pro...")
+        print("[Manager] Analysing briefing with Gemini 2.5 Flash...")
         ts = datetime.now(timezone.utc).isoformat()
+
+        capital_to_use = effective_capital if effective_capital is not None else self.capital
+        if is_cold_start:
+            print("[Manager] Cold start — conservative sizing active")
 
         try:
             raw_decisions = self._decide(investigator_output, market_prices, open_positions)
         except Exception as e:
-            print(f"[Manager] ERROR — Gemini Pro failed: {e}")
+            print(f"[Manager] ERROR — Gemini Flash failed: {e}")
             return {
                 "agent":        "manager",
                 "timestamp":    ts,
@@ -368,6 +371,8 @@ class ManagerAgent:
         decisions  = self._build_decisions(
             raw_decisions, investigator_output, market_prices,
             open_positions, daily_drawdown_pct, total_drawdown_pct,
+            capital=capital_to_use,
+            is_cold_start=is_cold_start,
         )
         actionable = [d for d in decisions if d.direction in ("BUY", "SELL") and not d.rejected]
 

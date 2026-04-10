@@ -527,6 +527,83 @@ class HyperliquidExecutor:
         return [o.to_dict() for o in self._open_positions.values()]
 
     # ------------------------------------------------------------------
+    # Ponto 1: Saldo real disponível na exchange
+    # ------------------------------------------------------------------
+
+    def get_available_balance(self) -> float | None:
+        """
+        Fetches the real withdrawable USDC balance from the exchange via HTTP.
+        Returns None in PAPER mode (not applicable).
+
+        Used to prevent the bot from sizing positions based on a configured
+        capital that doesn't match the actual account balance.
+        """
+        if self.mode == HLMode.PAPER:
+            return None
+        if not self.wallet_address:
+            return None
+
+        base_url = HL_TESTNET_URL if self.mode == HLMode.TEST else HL_MAINNET_URL
+        try:
+            import requests as _req
+            resp = _req.post(
+                f"{base_url}/info",
+                json={"type": "clearinghouseState", "user": self.wallet_address},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            state = resp.json()
+            withdrawable = float(state.get("withdrawable", 0))
+            account_value = float(state.get("marginSummary", {}).get("accountValue", 0))
+            return withdrawable if withdrawable > 0 else account_value
+        except Exception as e:
+            print(f"[HL Executor] WARNING — could not fetch balance: {e}")
+            return None
+
+    # ------------------------------------------------------------------
+    # Ponto 3: Reconciliação de posições com a exchange
+    # ------------------------------------------------------------------
+
+    def reconcile_positions(self) -> list[dict]:
+        """
+        Compares local position state with real open positions on the exchange.
+        Returns positions found on the exchange that are NOT in local state.
+
+        Used to detect positions opened manually or from a previous session
+        that weren't recorded in trades-history.json.
+        """
+        if self.mode == HLMode.PAPER:
+            return []
+        if not self.wallet_address:
+            return []
+
+        base_url = HL_TESTNET_URL if self.mode == HLMode.TEST else HL_MAINNET_URL
+        try:
+            import requests as _req
+            resp = _req.post(
+                f"{base_url}/info",
+                json={"type": "clearinghouseState", "user": self.wallet_address},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            state = resp.json()
+
+            exchange_positions = [
+                p["position"] for p in state.get("assetPositions", [])
+                if float(p["position"].get("szi", 0)) != 0
+            ]
+
+            local_tickers = {t.upper() for t in self._open_positions.keys()}
+            unknown = [
+                p for p in exchange_positions
+                if p.get("coin", "").upper() not in local_tickers
+            ]
+            return unknown
+        except Exception as e:
+            print(f"[HL Executor] WARNING — reconciliation failed: {e}")
+            return []
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
