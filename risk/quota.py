@@ -16,11 +16,14 @@ from pathlib import Path
 
 QUOTA_FILE = Path(__file__).parent.parent / "memory" / "quota-state.json"
 
-# Daily limits per service
+# Daily limits per service.
+# NOTE: alpha_vantage limit is in real API calls (not reports).
+# get_technical_report() uses 3 calls per ticker — check_and_consume() is
+# called with units=3 so this limit is properly respected.
 DAILY_LIMITS: dict[str, int] = {
     "gemini_pro":    100,
     "gemini_flash":  1500,
-    "alpha_vantage": 25,
+    "alpha_vantage": 25,   # 25 real calls/day → ~8 full reports (3 calls each)
 }
 
 # Safety threshold — stop at this % of limit to leave headroom
@@ -62,12 +65,13 @@ class QuotaTracker:
             self._state = {"date": today, "counts": {}}
             self._save()
 
-    def check_and_consume(self, service: str) -> tuple[bool, str]:
+    def check_and_consume(self, service: str, units: int = 1) -> tuple[bool, str]:
         """
-        Checks quota and consumes 1 call if available.
+        Checks quota and consumes N calls if available.
 
         Args:
             service: Service name (e.g. "gemini_pro").
+            units:   Number of API calls to consume (default 1).
 
         Returns:
             (allowed: bool, reason: str)
@@ -94,7 +98,7 @@ class QuotaTracker:
                 f"({current}/{limit} used, {remaining} reserved)"
             )
 
-        self._state["counts"][service] = current + 1
+        self._state["counts"][service] = current + units
         self._save()
         return True, ""
 

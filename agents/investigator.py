@@ -185,15 +185,19 @@ class InvestigatorAgent:
             return f"CoinGecko error: {e}"
 
     def _collect_technical(self, tickers: list[str]) -> str:
-        """RSI + MACD via Alpha Vantage (limited to max_av_tickers)."""
+        """RSI + MACD via Alpha Vantage (limited to max_av_tickers).
+        Each ticker consumes 3 quota units (snapshot + RSI + MACD)."""
         if not self.alpha_vantage_key:
+            print("[Investigator] Alpha Vantage key not set — technical indicators skipped.")
             return "Alpha Vantage not configured — technical indicators unavailable."
 
         av = AlphaVantageClient(api_key=self.alpha_vantage_key)
         lines = []
         for ticker in tickers[:self.max_av_tickers]:
-            allowed, reason = self._quota.check_and_consume("alpha_vantage")
+            # get_technical_report makes 3 real API calls — consume 3 quota units upfront
+            allowed, reason = self._quota.check_and_consume("alpha_vantage", units=3)
             if not allowed:
+                print(f"[Investigator] AV quota blocked for {ticker}: {reason}")
                 lines.append(f"  {ticker}: skipped — {reason}")
                 continue
             try:
@@ -201,13 +205,16 @@ class InvestigatorAgent:
                 rsi    = report.get("rsi_latest") or {}
                 macd   = report.get("macd_latest") or {}
                 signal = report.get("signal", {})
-                lines.append(
+                line = (
                     f"  {ticker}: RSI={rsi.get('rsi', 'N/A')} | "
                     f"MACD hist={macd.get('histogram', 'N/A')} | "
                     f"Signal: {signal.get('direction', 'N/A')} — {signal.get('reason', '')}"
                 )
+                lines.append(line)
+                print(f"[Investigator] AV ✓ {line.strip()}")
                 time.sleep(12)  # 5 req/min on free plan → ~12s between 3-req reports
             except Exception as e:
+                print(f"[Investigator] AV ✗ {ticker}: {e}")
                 lines.append(f"  {ticker}: AV error — {e}")
 
         if not lines:
