@@ -4,11 +4,12 @@ Uses Gemini 2.5 Flash to synthesise data from multiple sources
 and produce a structured briefing for the manager agent.
 
 Sources consulted per cycle:
-  1. FRED API          → macro (rates, inflation, yield curve)
-  2. CoinGecko         → prices and 24h change (batch, 1 req)
-  3. Alpha Vantage     → RSI + MACD (3 req/ticker — use sparingly)
-  4. CryptoPanic       → headlines and raw sentiment
-  5. Gemini 2.5 Flash  → narrative synthesis + structured briefing
+  1. FRED API            → macro (rates, inflation, yield curve)
+  2. CoinGecko           → prices and 24h change (batch, 1 req)
+  3. Alpha Vantage       → RSI + MACD (3 req/ticker — use sparingly)
+  4. CryptoCompare News  → headlines (free, no key required)
+  5. RSS Feeds           → CoinDesk, CoinTelegraph, etc.
+  6. Gemini 2.5 Flash    → narrative synthesis + structured briefing
 
 Alpha Vantage quota: 25 req/day.
   max_av_tickers controls how many tickers receive AV analysis (default 2).
@@ -26,7 +27,7 @@ import google.generativeai as genai
 from skills.data_fetchers.fred import fetch_macro_snapshot
 from skills.data_fetchers.coingecko import CoinGeckoClient
 from skills.data_fetchers.alpha_vantage import AlphaVantageClient
-from skills.data_fetchers.cryptopanic import fetch_headlines
+from skills.data_fetchers.cryptocompare_news import fetch_news as fetch_cc_news, format_for_prompt as cc_format
 from skills.data_fetchers.fear_greed import (
     fetch_fear_greed_index,
     fear_greed_signal,
@@ -217,27 +218,12 @@ class InvestigatorAgent:
         return "\n".join(lines)
 
     def _collect_news(self, tickers: list[str]) -> str:
-        """CryptoPanic headlines formatted for the prompt."""
-        if not self.cryptopanic_token:
-            return "CryptoPanic token not configured — news pillar unavailable."
+        """CryptoCompare News headlines formatted for the prompt (free, no key required)."""
         try:
-            headlines = fetch_headlines(
-                auth_token=self.cryptopanic_token,
-                currencies=tickers,
-                max_results=15,
-            )
-            if not headlines:
-                return "No headlines available."
-            lines = []
-            for h in headlines[:15]:
-                title   = h.get("title", "")
-                pub     = h.get("published_at", "")[:10]
-                bullish = h.get("bullish_votes", 0)
-                bearish = h.get("bearish_votes", 0)
-                lines.append(f"  [{pub}] {title} (↑{bullish} ↓{bearish})")
-            return "\n".join(lines)
+            articles = fetch_cc_news(tickers=tickers, max_results=20)
+            return cc_format(articles, max_items=15)
         except Exception as e:
-            return f"CryptoPanic error: {e}"
+            return f"CryptoCompare News error: {e}"
 
     def _collect_fear_greed(self) -> str:
         """Fetches Fear & Greed Index from Alternative.me."""
@@ -419,7 +405,7 @@ class InvestigatorAgent:
               f"(AV, max {self.max_av_tickers} tickers)...")
         technical = self._collect_technical(watchlist)
 
-        print("[Investigator] Fetching news (CryptoPanic)...")
+        print("[Investigator] Fetching news (CryptoCompare — free)...")
         news = self._collect_news(watchlist)
 
         print("[Investigator] Fetching Fear & Greed Index (Alternative.me)...")
