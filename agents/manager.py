@@ -24,7 +24,7 @@ from risk.quota import QuotaTracker
 # Constants
 # ------------------------------------------------------------------
 
-_MODEL_NAME = "gemini-2.5-pro-preview-05-06"
+_MODEL_NAME = "gemini-2.5-flash"
 
 
 # ------------------------------------------------------------------

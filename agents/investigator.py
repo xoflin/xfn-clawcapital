@@ -37,7 +37,7 @@ from risk.quota import QuotaTracker
 from skills.data_fetchers.coinglass import fetch_derivatives_snapshot
 
 
-_MODEL_NAME = "gemini-2.5-flash-preview-04-17"
+_MODEL_NAME = "gemini-2.5-flash"
 
 
 # ------------------------------------------------------------------
