@@ -263,6 +263,13 @@ class ManagerAgent:
             thesis     = raw.get("thesis", "")
             rej_reason = raw.get("rejection_reason", "")
 
+            # Auto-calculate stop loss if Gemini didn't provide one
+            if stop <= 0 and entry > 0 and direction in ("BUY", "SELL"):
+                if direction == "BUY":
+                    stop = round(entry * (1 - self.stop_loss_pct / 100), 6)
+                else:
+                    stop = round(entry * (1 + self.stop_loss_pct / 100), 6)
+
             # Confidence: conviction weighted by investigator's bias quality
             # Formula prevents double-penalty: even low bias_confidence preserves 50% of conviction
             confidence     = conviction * (0.5 + bias_confidence * 0.5)
@@ -354,7 +361,6 @@ class ManagerAgent:
 
         try:
             raw_decisions = self._decide(investigator_output, market_prices, open_positions)
-            print(f"[Manager] DEBUG — Raw Gemini response: {json.dumps(raw_decisions, indent=2, ensure_ascii=False)}")
         except Exception as e:
             print(f"[Manager] ERROR — Gemini Pro failed: {e}")
             return {
