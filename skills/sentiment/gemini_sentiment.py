@@ -56,7 +56,7 @@ def analyse(api_key: str, headlines: list[dict]) -> dict:
         json.JSONDecodeError: If Gemini does not return valid JSON.
     """
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.5-flash")
 
     headlines_json_str = json.dumps(headlines, ensure_ascii=False, indent=2)
     prompt = SENTIMENT_PROMPT.format(headlines_json=headlines_json_str)
