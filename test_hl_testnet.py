@@ -2,6 +2,8 @@
 Test script: Hyperliquid Testnet Connection
 Verifica se consegues aceder aos fundos na testnet.
 
+Usa HTTP direto à API (sem SDK) para contornar bugs de compatibilidade.
+
 Uso:
   python test_hl_testnet.py
 
@@ -12,13 +14,16 @@ Requer no .env:
 
 import os
 import sys
+import requests
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
 
-# Check credentials
-wallet = os.environ.get("HL_WALLET_ADDRESS")
+BASE_URL = "https://api.hyperliquid-testnet.xyz"
+
+# ── Credenciais ───────────────────────────────────────────────────────
+wallet      = os.environ.get("HL_WALLET_ADDRESS")
 private_key = os.environ.get("HL_PRIVATE_KEY")
 
 if not wallet or not private_key:
@@ -29,52 +34,55 @@ if not wallet or not private_key:
 print(f"✓ Wallet: {wallet[:10]}...")
 print(f"✓ Private Key: configurada\n")
 
-# Import Hyperliquid SDK
-try:
-    from hyperliquid.info import Info
-    import eth_account
-    print("✓ Hyperliquid SDK importado\n")
-except ImportError as e:
-    print(f"❌ Hyperliquid SDK não instalado: {e}")
-    print("   Instala com: pip install hyperliquid-python-sdk")
-    sys.exit(1)
 
-BASE_URL = "https://api.hyperliquid-testnet.xyz"
+def hl_post(payload: dict) -> dict:
+    """Faz um POST à API do Hyperliquid."""
+    r = requests.post(
+        f"{BASE_URL}/info",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        timeout=10,
+    )
+    r.raise_for_status()
+    return r.json()
 
-# ── 1. Ligação via Info (só leitura — não faz trades) ────────────────
-print("🔗 Ligando ao Hyperliquid TESTNET (Info)...\n")
+
+# ── 1. Conectividade ──────────────────────────────────────────────────
+print("🔗 Testando conectividade ao TESTNET...\n")
 try:
-    info = Info(base_url=BASE_URL, skip_ws=True)
-    print("✅ Conectado ao TESTNET\n")
+    meta = hl_post({"type": "meta"})
+    coins = meta.get("universe", [])
+    print(f"✅ TESTNET acessível — {len(coins)} pares disponíveis")
+    for c in coins[:5]:
+        print(f"   {c.get('name')}")
+    print("   ...\n")
 except Exception as e:
-    import traceback
-    print(f"❌ Erro ao conectar Info: {e}")
-    traceback.print_exc()
+    print(f"❌ Sem acesso ao TESTNET: {e}")
     sys.exit(1)
 
 # ── 2. Saldo ─────────────────────────────────────────────────────────
 print("📊 Verificando saldo...\n")
 try:
-    user_state = info.user_state(wallet)
-    margin_summary = user_state.get("marginSummary", {})
-    account_value = float(margin_summary.get("accountValue", 0))
-    withdrawable   = float(user_state.get("withdrawable", 0))
+    state = hl_post({"type": "clearinghouseState", "user": wallet})
+    margin = state.get("marginSummary", {})
+    account_value = float(margin.get("accountValue", 0))
+    withdrawable  = float(state.get("withdrawable", 0))
 
     if account_value > 0:
         print(f"💰 Account Value: ${account_value:,.2f}")
         print(f"💵 Withdrawable:  ${withdrawable:,.2f}\n")
     else:
         print("⚠️  Saldo zero — ainda não recebeste testnet funds?")
-        print("   Pede em: https://hyperliquid.xyz/testnet\n")
+        print("   Pede em: https://app.hyperliquid-testnet.xyz/drip\n")
 except Exception as e:
     print(f"❌ Erro ao fetchar saldo: {e}\n")
 
 # ── 3. Posições abertas ───────────────────────────────────────────────
 print("📈 Posições abertas...\n")
 try:
-    user_state = info.user_state(wallet)
+    state = hl_post({"type": "clearinghouseState", "user": wallet})
     positions = [
-        p for p in user_state.get("assetPositions", [])
+        p for p in state.get("assetPositions", [])
         if float(p["position"]["szi"]) != 0
     ]
     if positions:
@@ -90,7 +98,7 @@ except Exception as e:
 # ── 4. Ordens abertas ─────────────────────────────────────────────────
 print("\n📋 Ordens abertas...\n")
 try:
-    orders = info.open_orders(wallet)
+    orders = hl_post({"type": "openOrders", "user": wallet})
     if orders:
         print(f"✓ {len(orders)} ordem(ns) abertas:")
         for o in orders:
@@ -100,38 +108,27 @@ try:
 except Exception as e:
     print(f"❌ Erro ao fetchar ordens: {e}\n")
 
-# ── 5. Mercado ────────────────────────────────────────────────────────
-print("\n🧪 Mercado disponível...\n")
+# ── 5. SDK Exchange (para fazer ordens) ───────────────────────────────
+print("\n🔑 Testando Exchange SDK (necessário para ordens)...\n")
 try:
-    meta = info.meta()
-    coins = meta.get("universe", [])
-    print(f"✓ {len(coins)} pares disponíveis na testnet")
-    for c in coins[:5]:
-        print(f"  {c.get('name')}")
-    print("  ...")
-    print("\n✅ TESTNET ACESSÍVEL E FUNCIONAL!")
-except Exception as e:
-    print(f"❌ Erro ao fetchar mercado: {e}")
-
-# ── 6. Teste do Exchange (para trades) ────────────────────────────────
-print("\n🔑 Testando Exchange (necessário para ordens)...\n")
-try:
+    import eth_account
     from hyperliquid.exchange import Exchange
-    account = eth_account.Account.from_key(private_key)
+
+    account  = eth_account.Account.from_key(private_key)
     exchange = Exchange(
         wallet=account,
         base_url=BASE_URL,
         account_address=wallet,
     )
-    print("✅ Exchange inicializado — pronto para fazer ordens!\n")
+    print("✅ Exchange SDK inicializado — pronto para ordens!")
 except Exception as e:
-    print(f"⚠️  Exchange não inicializado: {e}")
-    print("   (Info funciona — só ordens é que falhariam)\n")
+    print(f"⚠️  Exchange SDK falhou: {e}")
+    print("   (API HTTP funciona — workaround possível se necessário)")
 
-print("=" * 60)
+print("\n" + "=" * 60)
 print("PRÓXIMOS PASSOS:")
 print("=" * 60)
-print("1. Se viste o saldo: Podes fazer trading na testnet ✓")
+print("1. Se viste saldo > 0: Podes fazer trading na testnet ✓")
 print("2. Se saldo = 0: Pede testnet funds em:")
 print("   https://app.hyperliquid-testnet.xyz/drip")
 print("3. Para correr o bot na testnet: HL_MODE=test no .env")
