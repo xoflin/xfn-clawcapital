@@ -117,15 +117,25 @@ try:
     account = eth_account.Account.from_key(private_key)
 
     # Obter meta e spot_meta via HTTP primeiro para evitar bug no SDK
-    meta_resp     = hl_post({"type": "meta"})
+    meta_resp      = hl_post({"type": "meta"})
     spot_meta_resp = hl_post({"type": "spotMeta"})
+
+    # Workaround: a testnet tem pares spot com índices de tokens fora
+    # do intervalo — filtramos os pares inválidos antes de passar ao SDK
+    tokens = spot_meta_resp.get("tokens", [])
+    valid_universe = [
+        s for s in spot_meta_resp.get("universe", [])
+        if len(s.get("tokens", [])) >= 2
+        and max(s["tokens"]) < len(tokens)
+    ]
+    spot_meta_fixed = {"universe": valid_universe, "tokens": tokens}
 
     exchange = Exchange(
         wallet=account,
         base_url=BASE_URL,
         account_address=wallet,
         meta=meta_resp,
-        spot_meta=spot_meta_resp,
+        spot_meta=spot_meta_fixed,
     )
     print("✅ Exchange SDK inicializado — pronto para ordens!")
 except Exception as e:
