@@ -96,32 +96,27 @@ class ManagerDecision:
 # ------------------------------------------------------------------
 
 _MANAGER_PROMPT = """\
-You are a senior quantitative portfolio manager focused on capital preservation.
-Your sole function is to make definitive investment decisions based on the investigator's briefing.
+You are a senior quantitative portfolio manager. Your sole function is to make
+definitive directional decisions (BUY, SELL, or HOLD) based on the investigator's briefing.
+Risk veto rules and position sizing are handled downstream — your job is direction only.
 
 === INVESTIGATOR BRIEFING ===
 {briefing_json}
 
-=== RISK PARAMETERS ===
-Total available capital: ${capital:,.2f}
-Maximum risk per trade: {max_risk_pct:.1f}% of capital
-Default stop loss: {stop_loss_pct:.1f}% below entry (BUY) or above (SELL)
-Minimum risk/reward ratio: {risk_reward_ratio:.1f}:1
-Minimum confidence for entry: {min_confidence:.0%}
-Currently open positions: {open_positions} / {max_positions}
+=== CONTEXT ===
+Capital: ${capital:,.2f} | Open positions: {open_positions}/{max_positions}
+Stop loss default: {stop_loss_pct:.1f}% | Min R/R: {risk_reward_ratio:.1f}:1
 
 === CURRENT MARKET PRICES ===
 {market_prices}
 
 ---
-Non-negotiable principles:
-1. Capital preservation is the absolute priority.
-2. When in doubt, HOLD is always the correct decision.
-3. Never enter a trade purely on momentum — require signal confluence.
-4. A rejected trade that would have been profitable is far less damaging than a loss.
-
-For each asset in assets_ranked, decide BUY, SELL or HOLD.
-Set entry_price and stop_loss_price based on market structure — do NOT compute position size.
+Instructions:
+- Decide BUY, SELL, or HOLD for each asset based on the overall_bias, asset scores, and market data.
+- HOLD only when signals are genuinely contradictory or flat — not merely because data is incomplete.
+- Incomplete data is normal in crypto — use what is available and assign conviction accordingly.
+- Always set a stop_loss_price (use {stop_loss_pct:.1f}% from entry if no technical level is available).
+- conviction reflects your confidence in the direction: 0.0 = uncertain, 1.0 = very confident.
 
 Respond with JSON ONLY:
 
@@ -130,10 +125,10 @@ Respond with JSON ONLY:
     "ticker": "<TICKER>",
     "direction": "<BUY|SELL|HOLD>",
     "conviction": <0.0 to 1.0>,
-    "entry_price": <current asset price>,
-    "stop_loss_price": <stop loss price — technical level>,
-    "thesis": "<investment thesis in 1-2 direct sentences>",
-    "rejection_reason": "<reason if HOLD, empty string if BUY/SELL>"
+    "entry_price": <current market price>,
+    "stop_loss_price": <technical stop or {stop_loss_pct:.1f}% from entry>,
+    "thesis": "<1-2 sentences on why BUY/SELL/HOLD>",
+    "rejection_reason": "<only if HOLD — what would change the decision>"
   }}
 ]
 
@@ -207,10 +202,8 @@ class ManagerAgent:
         prompt = _MANAGER_PROMPT.format(
             briefing_json=json.dumps(briefing, ensure_ascii=False, indent=2),
             capital=self.capital,
-            max_risk_pct=self._risk.config.max_risk_per_trade_pct,
             stop_loss_pct=self.stop_loss_pct,
             risk_reward_ratio=self.risk_reward_ratio,
-            min_confidence=self.min_confidence,
             open_positions=open_positions,
             max_positions=self.max_positions,
             market_prices=prices_str,
