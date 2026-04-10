@@ -168,13 +168,27 @@ class HyperliquidExecutor:
         key_to_use = agent_key if agent_key else private_key
         wallet = eth_account.Account.from_key(key_to_use)
 
-        # Exchange espera: wallet, base_url, account_address
+        # Obter meta e spot_meta via HTTP para evitar bug do SDK na testnet
+        # (a testnet tem pares spot com índices de tokens fora do intervalo)
+        import requests as _req
+        meta_resp      = _req.post(f"{base_url}/info", json={"type": "meta"}, timeout=10).json()
+        spot_meta_resp = _req.post(f"{base_url}/info", json={"type": "spotMeta"}, timeout=10).json()
+        tokens = spot_meta_resp.get("tokens", [])
+        valid_universe = [
+            s for s in spot_meta_resp.get("universe", [])
+            if len(s.get("tokens", [])) >= 2 and max(s["tokens"]) < len(tokens)
+        ]
+        spot_meta_fixed = {"universe": valid_universe, "tokens": tokens}
+
+        # Exchange espera: wallet, base_url, meta, account_address, spot_meta
         exchange = Exchange(
             wallet=wallet,
             base_url=base_url,
             account_address=wallet_address,
+            meta=meta_resp,
+            spot_meta=spot_meta_fixed,
         )
-        info = Info(base_url=base_url, skip_ws=True)
+        info = Info(base_url=base_url, skip_ws=True, meta=meta_resp, spot_meta=spot_meta_fixed)
 
         env = "TESTNET" if testnet else "MAINNET"
         print(f"[HL Executor] Ligado ao Hyperliquid {env} — wallet: {wallet_address[:10]}...")
