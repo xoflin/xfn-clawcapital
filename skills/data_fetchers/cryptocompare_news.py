@@ -55,11 +55,10 @@ def fetch_news(
             ...
         ]
     """
+    # Fetch general news (no category filter — more reliable than the categories param,
+    # which can return a dict instead of a list and cause slicing errors).
+    # Ticker filtering is done client-side after fetching.
     params: dict = {"lang": "EN", "sortOrder": "latest"}
-
-    if tickers:
-        categories = [TICKER_CATEGORIES.get(t.upper(), t.upper()) for t in tickers]
-        params["categories"] = ",".join(categories)
 
     try:
         resp = requests.get(CRYPTOCOMPARE_URL, params=params, timeout=timeout)
@@ -68,8 +67,24 @@ def fetch_news(
     except Exception as e:
         raise RuntimeError(f"CryptoCompare News fetch failed: {e}")
 
+    raw_data = data.get("Data")
+    if not isinstance(raw_data, list):
+        msg = data.get("Message", "unexpected API response format")
+        raise RuntimeError(f"CryptoCompare News: {msg}")
+
+    ticker_set = {t.upper() for t in tickers} if tickers else set()
+
     articles = []
-    for item in data.get("Data", [])[:max_results]:
+    for item in raw_data:
+        # Client-side ticker filter: include article if it mentions any watchlist ticker
+        if ticker_set:
+            cats = (item.get("categories", "") or "").upper()
+            tags = (item.get("tags", "") or "").upper()
+            title = (item.get("title", "") or "").upper()
+            combined = f"{cats} {tags} {title}"
+            if not any(t in combined for t in ticker_set):
+                continue
+
         published_ts = item.get("published_on", 0)
         published_at = (
             datetime.fromtimestamp(published_ts, tz=timezone.utc).isoformat()
@@ -83,6 +98,9 @@ def fetch_news(
             "body":         item.get("body", "")[:300],
             "categories":   item.get("categories", ""),
         })
+
+        if len(articles) >= max_results:
+            break
 
     return articles
 

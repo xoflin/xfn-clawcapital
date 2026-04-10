@@ -209,8 +209,14 @@ class InvestigatorAgent:
                     f"Signal: {signal.get('direction', 'N/A')} — {signal.get('reason', '')}"
                 )
                 time.sleep(12)  # 5 req/min on free plan → ~12s between 3-req reports
+            except RuntimeError as e:
+                # AV returned a rate-limit error — exhaust quota tracker to block further calls
+                if "rate limit" in str(e).lower():
+                    self._quota.mark_exhausted("alpha_vantage")
+                lines.append(f"  {ticker}: AV error — {str(e)[:50]}")
+                break  # no point retrying remaining tickers
             except Exception as e:
-                lines.append(f"  {ticker}: AV error — {e}")
+                lines.append(f"  {ticker}: AV error — {str(e)[:50]}")
 
         if not lines:
             return "No tickers with technical analysis available."

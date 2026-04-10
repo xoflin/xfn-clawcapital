@@ -102,6 +102,17 @@ class QuotaTracker:
         self._save()
         return True, ""
 
+    def mark_exhausted(self, service: str) -> None:
+        """
+        Marks a service as quota-exhausted for today.
+        Called when the real API returns a rate-limit error, even though
+        our local counter thought there were calls remaining.
+        """
+        limit = DAILY_LIMITS.get(service)
+        if limit is not None:
+            self._state["counts"][service] = limit
+            self._save()
+
     def remaining(self, service: str) -> int:
         """Returns remaining calls for a service today."""
         limit = DAILY_LIMITS.get(service, 0)

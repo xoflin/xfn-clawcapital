@@ -50,17 +50,23 @@ def fetch_fear_greed_index(limit: int = 30) -> dict:
         response.raise_for_status()
         data = response.json()
 
-        if data.get("status") != "success":
-            raise ValueError(f"Fear & Greed API error: {data.get('status_code')}")
+        # alternative.me does not return a "status" field — check metadata.error instead
+        meta_err = data.get("metadata", {}).get("error")
+        if meta_err:
+            raise ValueError(f"Fear & Greed API error: {meta_err}")
+
+        entries = data.get("data", [])
+        if not entries:
+            raise ValueError("Fear & Greed API: empty response")
 
         # Parse current value
-        current_entry = data.get("data", [{}])[0]
+        current_entry = entries[0]
         current_value = int(current_entry.get("value", 50))
         current_timestamp = int(current_entry.get("timestamp", 0))
 
         # Parse history
         history = []
-        for entry in data.get("data", []):
+        for entry in entries:
             try:
                 history.append(
                     {
