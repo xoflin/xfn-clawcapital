@@ -56,7 +56,9 @@ try:
     )
     print("✅ Conectado ao TESTNET\n")
 except Exception as e:
+    import traceback
     print(f"❌ Erro ao conectar: {e}")
+    traceback.print_exc()
     sys.exit(1)
 
 # Check balance
