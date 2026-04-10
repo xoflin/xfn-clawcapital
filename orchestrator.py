@@ -190,7 +190,6 @@ class Orchestrator:
         If skip_telegram=True, auto-approves (debug mode).
         """
         if self.skip_telegram:
-            print("  [Telegram] skip_telegram=True — auto-approved")
             return ApprovalResult(
                 approved=True,
                 decision="yes",
@@ -251,8 +250,7 @@ class Orchestrator:
 
             if hit:
                 label, exit_price = hit
-                print(f"[Orchestrator] {ticker} {label} hit @ ${exit_price:,.4f} "
-                      f"(current: ${price:,.4f})")
+                print(f"  {ticker} {label} hit  ${exit_price:,.4f}")
                 record = self.executor.close_position(ticker, exit_price)
                 if record:
                     record["exit_reason"] = label
@@ -288,10 +286,11 @@ class Orchestrator:
             Dict with the full cycle result.
         """
         cycle_start = datetime.now(timezone.utc).isoformat()
-        print(f"\n{'='*60}")
-        print(f"[Orchestrator] Cycle started: {cycle_start}")
-        print(f"[Orchestrator] Watchlist: {self.watchlist}")
-        print(f"{'='*60}")
+        _ts = cycle_start[:16].replace("T", "  ") + " UTC"
+        _wl = " · ".join(self.watchlist)
+        print(f"\n{'─'*56}")
+        print(f"  ClawCapital  {_ts}  [{_wl}]")
+        print(f"{'─'*56}")
 
         results: dict = {
             "cycle_start":     cycle_start,
@@ -302,54 +301,45 @@ class Orchestrator:
 
         # ── 1. Heartbeat ─────────────────────────────────────────────
         if not skip_heartbeat:
-            print("\n[Orchestrator] Running heartbeat...")
             hb = self._heartbeat()
             results["heartbeat"] = hb
             if not hb["healthy"]:
-                msg = f"Heartbeat failed: {hb['checks']}"
-                print(f"[Orchestrator] ERROR — {msg}")
-                results["errors"].append(msg)
+                failed = [k for k, v in hb["checks"].items() if not v]
+                print(f"  Heartbeat    ✗  {', '.join(failed)} unreachable — halting")
+                results["errors"].append(f"Heartbeat failed: {hb['checks']}")
                 results["status"] = "HALTED"
                 _append_to_log("cycles-log.json", results)
                 return results
-            print("[Orchestrator] Heartbeat OK")
+            ok_services = " + ".join(k for k, v in hb["checks"].items() if v)
+            print(f"  Heartbeat    ✓  {ok_services}")
 
         # ── 1b. Cold-start checks (balance + reconciliation) ─────────
-        # Ponto 1: Verificar saldo real disponível na exchange
         effective_capital = self.capital
         real_balance = self.executor.get_available_balance()
         if real_balance is not None:
             if real_balance < effective_capital * 0.95:
-                print(f"[Orchestrator] WARNING — Real balance ${real_balance:,.2f} is lower "
-                      f"than configured capital ${effective_capital:,.2f}. "
-                      f"Using real balance for sizing.")
                 effective_capital = real_balance
+                print(f"  Balance      ⚠  ${real_balance:,.2f} (below configured ${self.capital:,.2f} — using real)")
             else:
-                print(f"[Orchestrator] Balance OK — ${real_balance:,.2f} available")
+                print(f"  Balance      ✓  ${real_balance:,.2f}")
             results["real_balance"] = real_balance
 
-        # Ponto 2: Detectar cold start (sem histórico de trades)
         trades_path = MEMORY_DIR / "trades-history.json"
         is_cold_start = not trades_path.exists() or trades_path.stat().st_size < 10
-        if is_cold_start:
-            print("[Orchestrator] Cold start detected — no trade history. "
-                  "Conservative sizing will apply.")
+        open_pos_count = len(self.executor.get_open_positions())
+        dd = self._drawdown
+        cold_tag = "  ⚡ cold start — conservative sizing" if is_cold_start else ""
+        print(f"  Positions    ✓  {open_pos_count} open  |  DD daily={dd.daily_drawdown_pct:.2f}%  total={dd.total_drawdown_pct:.2f}%{cold_tag}")
         results["is_cold_start"] = is_cold_start
 
-        # Ponto 3: Reconciliar posições com a exchange
         unknown_positions = self.executor.reconcile_positions()
         if unknown_positions:
             tickers = [p.get("coin") for p in unknown_positions]
-            print(f"[Orchestrator] WARNING — {len(unknown_positions)} position(s) found on "
-                  f"exchange NOT in local state: {tickers}")
-            print("[Orchestrator] These positions will NOT be managed by the bot until "
-                  "they are recorded in trades-history.json.")
+            print(f"  Reconcile    ⚠  {len(unknown_positions)} untracked position(s) on exchange: {tickers}")
             results["untracked_positions"] = unknown_positions
-        elif real_balance is not None:
-            print("[Orchestrator] Positions reconciled — exchange matches local state")
 
         # ── 2. Investigator ──────────────────────────────────────────
-        print("\n[Orchestrator] Running investigator agent...")
+        print("")
         try:
             investigator_output = self.investigator.run(watchlist=self.watchlist)
             briefing = investigator_output["briefing"]
@@ -361,12 +351,9 @@ class Orchestrator:
                 "opportunities":   briefing.get("opportunities", []),
                 "assets_ranked":   briefing.get("assets_ranked", []),
             }
-            print(f"[Orchestrator] Bias: {briefing.get('overall_bias')} "
-                  f"(conf={briefing.get('bias_confidence', 0):.2f})")
         except Exception as e:
-            err = f"Investigator failed: {e}\n{traceback.format_exc()}"
-            print(f"[Orchestrator] ERROR — {e}")
-            results["errors"].append(err)
+            print(f"  [Investigator] ERROR — {e}")
+            results["errors"].append(f"Investigator failed: {e}\n{traceback.format_exc()}")
             results["status"] = "HALTED"
             _append_to_log("cycles-log.json", results)
             return results
@@ -374,22 +361,17 @@ class Orchestrator:
         time.sleep(2)
 
         # ── 3. Current prices + SL/TP check ─────────────────────────
-        print("\n[Orchestrator] Fetching current prices (CoinGecko)...")
         market_prices = self._get_current_prices()
         results["market_prices"] = market_prices
 
-        print("\n[Orchestrator] Checking SL/TP on open positions...")
         sl_tp_closes = self._check_sl_tp(market_prices)
         if sl_tp_closes:
             results["sl_tp_closes"] = sl_tp_closes
-            print(f"[Orchestrator] {len(sl_tp_closes)} position(s) closed by SL/TP")
 
         results["drawdown"] = self._drawdown.summary()
-        print(f"[Orchestrator] Drawdown — daily: {self._drawdown.daily_drawdown_pct:.2f}% | "
-              f"total: {self._drawdown.total_drawdown_pct:.2f}%")
 
         # ── 4. Manager ───────────────────────────────────────────────
-        print("\n[Orchestrator] Running manager agent (Gemini Flash)...")
+        print("")
         open_positions = len(self.executor.get_open_positions())
         try:
             manager_output = self.manager.run(
@@ -406,11 +388,9 @@ class Orchestrator:
                 "decisions":  manager_output["decisions"],
                 "actionable": [d.to_dict() for d in actionable],
             }
-            print(f"[Orchestrator] {len(actionable)} actionable decision(s)")
         except Exception as e:
-            err = f"Manager failed: {e}\n{traceback.format_exc()}"
-            print(f"[Orchestrator] ERROR — {e}")
-            results["errors"].append(err)
+            print(f"  [Manager] ERROR — {e}")
+            results["errors"].append(f"Manager failed: {e}\n{traceback.format_exc()}")
             results["status"] = "OK_WITH_ERRORS"
             results["cycle_end"] = datetime.now(timezone.utc).isoformat()
             _append_to_log("cycles-log.json", results)
@@ -418,11 +398,12 @@ class Orchestrator:
 
         # ── 5. Telegram approval + Execution ─────────────────────────
         approvals: list[dict] = []
+        print("")
 
         if not actionable:
-            print("\n[Orchestrator] No actionable decisions — HOLD on all assets")
             bias = briefing.get("overall_bias", "Neutral")
             conf = briefing.get("bias_confidence", 0)
+            print(f"  No entries — HOLD all  ({bias}  conf={conf:.2f})")
             send_notification(
                 text=(
                     f"*ClawCapital — Cycle {cycle_start[:10]}*\n"
@@ -433,11 +414,10 @@ class Orchestrator:
                 chat_id=self._tg_chat_id,
             )
         else:
-            print(f"\n[Orchestrator] Processing {len(actionable)} decision(s) via Telegram...")
+            print(f"  {len(actionable)} actionable — awaiting Telegram approval")
             for decision in actionable:
                 ticker    = decision.ticker
                 direction = decision.direction
-                print(f"\n  [{ticker}] {direction} — awaiting human approval...")
 
                 approval = self._request_human_approval(decision.to_telegram_briefing())
                 approval_dict = approval.to_dict()
@@ -445,7 +425,6 @@ class Orchestrator:
                 approvals.append(approval_dict)
 
                 if approval.approved:
-                    print(f"  [{ticker}] Approved — executing on Hyperliquid...")
                     try:
                         order = self.executor.submit_order(
                             ticker=ticker,
@@ -457,6 +436,11 @@ class Orchestrator:
                             notes=decision.thesis[:100],
                         )
                         results["executed_orders"].append(order.to_dict())
+                        print(
+                            f"  ✓ {ticker} {direction} submitted  "
+                            f"size=${order.size_usd:,.0f}  "
+                            f"SL=${order.stop_loss_price:,.0f}  TP=${order.take_profit_price:,.0f}"
+                        )
                         send_notification(
                             text=(
                                 f"✅ *{ticker} {direction} executed*\n"
@@ -469,17 +453,16 @@ class Orchestrator:
                             chat_id=self._tg_chat_id,
                         )
                     except Exception as e:
-                        err = f"Execution of {ticker} failed: {e}"
-                        print(f"  [{ticker}] ERROR — {e}")
-                        results["errors"].append(err)
+                        print(f"  ✗ {ticker} — execution error: {e}")
+                        results["errors"].append(f"Execution of {ticker} failed: {e}")
                         send_notification(
                             text=f"❌ *{ticker}* — Execution error: {e}",
                             bot_token=self._tg_token,
                             chat_id=self._tg_chat_id,
                         )
                 else:
-                    reason = approval.reason or f"Rejected by user ({approval.decision})"
-                    print(f"  [{ticker}] Not executed — {reason}")
+                    reason = approval.reason or f"rejected ({approval.decision})"
+                    print(f"  ✗ {ticker} — {reason}")
 
         results["approvals"] = approvals
 
@@ -491,8 +474,10 @@ class Orchestrator:
         results["status"]         = "OK" if not results["errors"] else "OK_WITH_ERRORS"
 
         _append_to_log("cycles-log.json", results)
-        print(f"\n[Orchestrator] Cycle complete — {results['status']} "
-              f"| {len(results['executed_orders'])} order(s) executed")
+        n_orders = len(results["executed_orders"])
+        print(f"\n{'─'*56}")
+        print(f"  Done  {results['status']}  |  {n_orders} order(s)")
+        print(f"{'─'*56}")
         return results
 
 

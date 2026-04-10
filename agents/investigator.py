@@ -188,7 +188,6 @@ class InvestigatorAgent:
         """RSI + MACD via Alpha Vantage (limited to max_av_tickers).
         Each ticker consumes 3 quota units (snapshot + RSI + MACD)."""
         if not self.alpha_vantage_key:
-            print("[Investigator] Alpha Vantage key not set — technical indicators skipped.")
             return "Alpha Vantage not configured — technical indicators unavailable."
 
         av = AlphaVantageClient(api_key=self.alpha_vantage_key)
@@ -197,7 +196,6 @@ class InvestigatorAgent:
             # get_technical_report makes 3 real API calls — consume 3 quota units upfront
             allowed, reason = self._quota.check_and_consume("alpha_vantage", units=3)
             if not allowed:
-                print(f"[Investigator] AV quota blocked for {ticker}: {reason}")
                 lines.append(f"  {ticker}: skipped — {reason}")
                 continue
             try:
@@ -205,16 +203,13 @@ class InvestigatorAgent:
                 rsi    = report.get("rsi_latest") or {}
                 macd   = report.get("macd_latest") or {}
                 signal = report.get("signal", {})
-                line = (
+                lines.append(
                     f"  {ticker}: RSI={rsi.get('rsi', 'N/A')} | "
                     f"MACD hist={macd.get('histogram', 'N/A')} | "
                     f"Signal: {signal.get('direction', 'N/A')} — {signal.get('reason', '')}"
                 )
-                lines.append(line)
-                print(f"[Investigator] AV ✓ {line.strip()}")
                 time.sleep(12)  # 5 req/min on free plan → ~12s between 3-req reports
             except Exception as e:
-                print(f"[Investigator] AV ✗ {ticker}: {e}")
                 lines.append(f"  {ticker}: AV error — {e}")
 
         if not lines:
@@ -398,43 +393,93 @@ class InvestigatorAgent:
               "briefing": { ... }   ← Gemini Flash output
             }
         """
-        print(f"[Investigator] Cycle started for {watchlist}")
         ts = datetime.now(timezone.utc).isoformat()
+        W  = 14  # label column width
 
-        print("[Investigator] Fetching macro data (FRED)...")
+        # ── helpers ──────────────────────────────────────────────────
+        _BAD = ("error", "unavailable", "not configured", "skipped —", "av error")
+
+        def _ok(data: str) -> bool:
+            return not any(b in data.lower() for b in _BAD)
+
+        def _line(label: str, data: str, summary: str | None = None) -> str:
+            s = (summary or data.strip().split("\n")[0].lstrip())[:76]
+            return f"  {label:<{W}}{'✓' if _ok(data) else '✗'}  {s}"
+
+        print(f"[Investigator] {' · '.join(watchlist)}")
+
+        # ── 1. FRED ──────────────────────────────────────────────────
         macro = self._collect_macro()
+        print(_line("FRED", macro))
 
-        print("[Investigator] Fetching market data (CoinGecko)...")
+        # ── 2. CoinGecko ─────────────────────────────────────────────
         market = self._collect_market(watchlist)
         time.sleep(1)
+        cg_parts = []
+        for _l in market.strip().split("\n"):
+            segs = [s.strip() for s in _l.split("|")]
+            if len(segs) >= 2:
+                t = segs[0].lstrip().replace(": $", " $").replace(":", "").strip()
+                c = segs[1].replace("24h:", "").strip()
+                cg_parts.append(f"{t} {c}")
+        print(_line("CoinGecko", market, " | ".join(cg_parts) or None))
 
-        print(f"[Investigator] Fetching technical indicators "
-              f"(AV, max {self.max_av_tickers} tickers)...")
+        # ── 3. Alpha Vantage ─────────────────────────────────────────
         technical = self._collect_technical(watchlist)
+        av_parts = []
+        for _l in technical.strip().split("\n"):
+            _l = _l.lstrip()
+            if "RSI=" in _l:
+                _t   = _l.split(":")[0].strip()
+                _rsi = next((s.strip() for s in _l.split("|") if "RSI=" in s), "")
+                _sig = next((s.split("—")[0].replace("Signal:", "").strip()
+                             for s in _l.split("|") if "Signal:" in s), "")
+                av_parts.append(f"{_t} {_rsi} {_sig}".strip())
+            elif "skipped" in _l or "error" in _l.lower():
+                av_parts.append(_l[:50])
+        print(_line("AlphaVantage", technical, " | ".join(av_parts) or None))
 
-        print("[Investigator] Fetching news (CryptoCompare — free)...")
+        # ── 4. News ──────────────────────────────────────────────────
         news = self._collect_news(watchlist)
+        n_news = sum(1 for _l in news.strip().split("\n") if _l.strip().startswith("["))
+        print(_line("News", news, f"{n_news} headlines" if n_news else None))
 
-        print("[Investigator] Fetching Fear & Greed Index (Alternative.me)...")
+        # ── 5. Fear & Greed ──────────────────────────────────────────
         fear_greed = self._collect_fear_greed()
+        fg_first = fear_greed.strip().split("\n")[0].lstrip().replace("Current: ", "")
+        print(_line("Fear&Greed", fear_greed, fg_first))
 
-        print("[Investigator] Fetching RSS feeds...")
+        # ── 6. RSS ───────────────────────────────────────────────────
         rss_feeds = self._collect_rss_feeds(watchlist)
+        n_rss = sum(1 for _l in rss_feeds.strip().split("\n") if _l.strip().startswith("["))
+        print(_line("RSS", rss_feeds, f"{n_rss} articles" if n_rss else None))
 
-        print("[Investigator] Fetching DeFi TVL (DeFiLlama)...")
+        # ── 7. DeFiLlama ─────────────────────────────────────────────
         defi = self._collect_defi()
+        _defi_parts = defi.strip().split("\n")[0].lstrip().split("|")
+        _defi_tvl   = _defi_parts[0].replace("Total DeFi TVL:", "TVL:").strip()
+        _defi_chg   = _defi_parts[1].replace("7d change:", "7d:").strip() if len(_defi_parts) > 1 else ""
+        defi_summary = f"{_defi_tvl}  {_defi_chg}".strip()
+        print(_line("DeFiLlama", defi, defi_summary or None))
 
-        print("[Investigator] Fetching derivatives data (CoinGlass)...")
+        # ── 8. CoinGlass ─────────────────────────────────────────────
         derivatives = self._collect_derivatives(watchlist)
+        print(_line("CoinGlass", derivatives))
 
-        print("[Investigator] Synthesising with Gemini 2.5 Flash...")
+        # ── 9. Gemini Flash synthesis ─────────────────────────────────
+        _gem_ok = True
         try:
             briefing = self._synthesize(
                 macro, market, technical, news,
                 fear_greed, rss_feeds, defi, derivatives,
             )
+            gem_summary = (
+                f"{briefing.get('overall_bias', 'N/A')}  "
+                f"conf={briefing.get('bias_confidence', 0):.2f}"
+            )
         except json.JSONDecodeError as e:
-            print(f"[Investigator] WARNING — invalid JSON from Gemini: {e}. Using fallback.")
+            _gem_ok     = False
+            gem_summary = f"JSON parse error — {str(e)[:55]}"
             briefing = {
                 "macro_summary":      macro[:300],
                 "market_summary":     market[:300],
@@ -448,8 +493,7 @@ class InvestigatorAgent:
                 "investigator_notes": "Automatic synthesis failed — raw data included.",
             }
 
-        print(f"[Investigator] Briefing generated — Bias: {briefing.get('overall_bias')} "
-              f"(conf={briefing.get('bias_confidence', 0):.2f})")
+        print(f"  {'Gemini Flash':<{W}}{'✓' if _gem_ok else '✗'}  {gem_summary}")
 
         return {
             "agent":     "investigator",

@@ -170,9 +170,6 @@ class RiskCalculator:
             self.config.max_risk_per_trade_pct * 0.5 if is_cold_start
             else self.config.max_risk_per_trade_pct
         )
-        if is_cold_start:
-            print(f"  [RiskCalc] Cold start detected — using conservative sizing "
-                  f"(kelly×0.5, risk_pct×0.5 → {effective_max_risk_pct:.2f}%)")
 
         stop_loss_pct = abs((entry_price - stop_loss_price) / entry_price) * 100
         max_risk_usd  = ff_skill.risk_amount(capital, effective_max_risk_pct)

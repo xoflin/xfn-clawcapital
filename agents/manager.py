@@ -348,17 +348,13 @@ class ManagerAgent:
             effective_capital:   Real balance from exchange (overrides self.capital if set).
             is_cold_start:       True when no trade history exists — triggers conservative sizing.
         """
-        print("[Manager] Analysing briefing with Gemini 2.5 Flash...")
         ts = datetime.now(timezone.utc).isoformat()
-
         capital_to_use = effective_capital if effective_capital is not None else self.capital
-        if is_cold_start:
-            print("[Manager] Cold start — conservative sizing active")
 
         try:
             raw_decisions = self._decide(investigator_output, market_prices, open_positions)
         except Exception as e:
-            print(f"[Manager] ERROR — Gemini Flash failed: {e}")
+            print(f"[Manager] ERROR — Gemini failed: {e}")
             return {
                 "agent":        "manager",
                 "timestamp":    ts,
@@ -376,13 +372,23 @@ class ManagerAgent:
         )
         actionable = [d for d in decisions if d.direction in ("BUY", "SELL") and not d.rejected]
 
+        print("[Manager]")
         for d in decisions:
-            status = "✓" if not d.rejected else "✗"
-            print(f"[Manager] {status} {d.ticker}: {d.direction} "
-                  f"(conviction={d.conviction:.2f}, confidence={d.confidence:.2f})"
-                  + (f" — {d.rejection_reason}" if d.rejected else ""))
-
-        print(f"[Manager] {len(actionable)}/{len(decisions)} actionable decisions")
+            if d.direction in ("BUY", "SELL") and not d.rejected:
+                print(
+                    f"  ✓ {d.direction:<4} {d.ticker:<5} "
+                    f"conv={d.conviction:.2f}  conf={d.confidence:.2f}  "
+                    f"${d.entry_price:,.0f}  SL ${d.stop_loss_price:,.0f}  "
+                    f"TP ${d.take_profit_price:,.0f}  size=${d.position_size_usd:,.0f}"
+                )
+            else:
+                reason = (d.rejection_reason.split(";")[0].strip()[:52]
+                          if d.rejection_reason else "HOLD")
+                print(
+                    f"  ✗      {d.ticker:<5} "
+                    f"conv={d.conviction:.2f}  conf={d.confidence:.2f}  {reason}"
+                )
+        print(f"  {len(actionable)}/{len(decisions)} actionable")
 
         return {
             "agent":        "manager",
