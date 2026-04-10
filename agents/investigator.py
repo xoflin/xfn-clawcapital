@@ -424,8 +424,6 @@ class InvestigatorAgent:
             s    = (summary or data.strip().split("\n")[0].lstrip())[:DW]
             return f"  {label:<{LW}}{icon} │ {s}"
 
-        print(f"[Investigator] {' · '.join(watchlist)}")
-
         # ── 1. FRED ──────────────────────────────────────────────────
         macro = self._collect_macro()
         # Show only first indicator (most relevant)
@@ -514,7 +512,7 @@ class InvestigatorAgent:
                 "investigator_notes": "Automatic synthesis failed — raw data included.",
             }
 
-        print(f"  {'Gemini Flash':<{LW}}{'✓' if _gem_ok else '✗'} │ {gem_summary}")
+        print(f"  [{_MODEL_NAME}]  {'✓' if _gem_ok else '✗'} │ {gem_summary}")
 
         return {
             "agent":     "investigator",

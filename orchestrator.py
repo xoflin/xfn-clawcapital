@@ -288,10 +288,6 @@ class Orchestrator:
         """
         cycle_start = datetime.now(timezone.utc).isoformat()
         _ts = cycle_start[:16].replace("T", "  ") + " UTC"
-        _wl = " · ".join(self.watchlist)
-        print(f"\n{'─'*56}")
-        print(f"  ClawCapital  {_ts}  [{_wl}]")
-        print(f"{'─'*56}")
 
         results: dict = {
             "cycle_start":     cycle_start,
@@ -300,44 +296,50 @@ class Orchestrator:
             "executed_orders": [],
         }
 
-        # ── 1. Heartbeat ─────────────────────────────────────────────
+        # ── 1. Heartbeat (silent if OK) ───────────────────────────────
         if not skip_heartbeat:
             hb = self._heartbeat()
             results["heartbeat"] = hb
             if not hb["healthy"]:
                 failed = [k for k, v in hb["checks"].items() if not v]
-                print(f"  Heartbeat    ✗  {', '.join(failed)} unreachable — halting")
+                print(f"\n  ✗ {', '.join(failed)} unreachable — halting")
                 results["errors"].append(f"Heartbeat failed: {hb['checks']}")
                 results["status"] = "HALTED"
                 _append_to_log("cycles-log.json", results)
                 return results
-            ok_services = " + ".join(k for k, v in hb["checks"].items() if v)
-            print(f"  Heartbeat    ✓  {ok_services}")
 
-        # ── 1b. Cold-start checks (balance + reconciliation) ─────────
+        # ── 2. Pre-flight: balance + cold start + reconcile ───────────
         effective_capital = self.capital
         real_balance = self.executor.get_available_balance()
         if real_balance is not None:
             effective_capital = real_balance
-            print(f"  Balance      ✓  ${real_balance:,.2f}")
             results["real_balance"] = real_balance
 
         trades_path = MEMORY_DIR / "trades-history.json"
         is_cold_start = not trades_path.exists() or trades_path.stat().st_size < 10
         open_pos_count = len(self.executor.get_open_positions())
-        dd = self._drawdown
-        cold_tag = "  ⚡ cold start — conservative sizing" if is_cold_start else ""
-        print(f"  Positions    ✓  {open_pos_count} open  |  DD daily={dd.daily_drawdown_pct:.2f}%  total={dd.total_drawdown_pct:.2f}%{cold_tag}")
         results["is_cold_start"] = is_cold_start
 
         unknown_positions = self.executor.reconcile_positions()
         if unknown_positions:
-            tickers = [p.get("coin") for p in unknown_positions]
-            print(f"  Reconcile    ⚠  {len(unknown_positions)} untracked position(s) on exchange: {tickers}")
             results["untracked_positions"] = unknown_positions
 
-        # ── 2. Investigator ──────────────────────────────────────────
-        print("")
+        # ── [Investigator] header (balance + positions shown here) ────
+        _wl = " · ".join(self.watchlist)
+        dd = self._drawdown
+        cold_tag = "  ⚡ cold start" if is_cold_start else ""
+        print(f"\n{'─'*56}")
+        print(f"  ClawCapital  {_ts}")
+        print(f"{'─'*56}\n")
+        print(f"[Investigator] {_wl}")
+        if real_balance is not None:
+            print(f"  Balance      ✓  ${real_balance:,.2f}")
+        print(f"  Positions    ✓  {open_pos_count} open  |  DD daily={dd.daily_drawdown_pct:.2f}%  total={dd.total_drawdown_pct:.2f}%{cold_tag}")
+        if unknown_positions:
+            utickers = [p.get("coin") for p in unknown_positions]
+            print(f"  Reconcile    ⚠  {len(unknown_positions)} untracked on exchange: {utickers}")
+
+        # ── 3. Investigator (prints source lines, no header) ──────────
         try:
             investigator_output = self.investigator.run(watchlist=self.watchlist)
             briefing = investigator_output["briefing"]
@@ -369,7 +371,6 @@ class Orchestrator:
         results["drawdown"] = self._drawdown.summary()
 
         # ── 4. Manager ───────────────────────────────────────────────
-        print("")
         open_positions = len(self.executor.get_open_positions())
         try:
             manager_output = self.manager.run(

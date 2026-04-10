@@ -374,23 +374,20 @@ class ManagerAgent:
         )
         actionable = [d for d in decisions if d.direction in ("BUY", "SELL") and not d.rejected]
 
-        print("[Manager]")
+        print("")
         for d in decisions:
-            if d.direction in ("BUY", "SELL") and not d.rejected:
-                print(
-                    f"  ✓ {d.direction:<4} {d.ticker:<5} "
-                    f"conv={d.conviction:.2f}  conf={d.confidence:.2f}  "
-                    f"${d.entry_price:,.0f}  SL ${d.stop_loss_price:,.0f}  "
-                    f"TP ${d.take_profit_price:,.0f}  size=${d.position_size_usd:,.0f}"
-                )
+            is_active = d.direction in ("BUY", "SELL") and not d.rejected
+            dir_str  = f"{d.direction:<4}" if is_active else "    "
+            if is_active:
+                text = (d.thesis or "")[:65]
             else:
-                reason = (d.rejection_reason.split(";")[0].strip()[:52]
-                          if d.rejection_reason else "HOLD")
-                print(
-                    f"  ✗      {d.ticker:<5} "
-                    f"conv={d.conviction:.2f}  conf={d.confidence:.2f}  {reason}"
-                )
-        print(f"  {len(actionable)}/{len(decisions)} actionable")
+                text = (d.rejection_reason.split(";")[0].strip()[:65]
+                        if d.rejection_reason else "HOLD")
+            print(
+                f"  {d.ticker:<4} {dir_str} | "
+                f"conv={d.conviction:.2f}  conf={d.confidence:.2f} | "
+                f"{text}"
+            )
 
         return {
             "agent":        "manager",
