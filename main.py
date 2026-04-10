@@ -28,11 +28,14 @@ from executor.hyperliquid import HLMode
 
 
 def build_orchestrator(skip_telegram: bool = False) -> Orchestrator:
-    required = ["CRYPTOPANIC_TOKEN", "GEMINI_API_KEY"]
+    required = ["GEMINI_API_KEY"]
     missing  = [k for k in required if not os.getenv(k)]
     if missing:
         print(f"[ClawCapital] ERROR: missing variables in .env: {', '.join(missing)}")
         sys.exit(1)
+
+    if not os.getenv("CRYPTOPANIC_TOKEN"):
+        print("[ClawCapital] WARNING: CRYPTOPANIC_TOKEN not set — news pillar will be skipped")
 
     hl_mode_str = os.environ.get("HL_MODE", "paper").lower()
     hl_mode = {"paper": HLMode.PAPER, "test": HLMode.TEST, "live": HLMode.LIVE}.get(
@@ -41,7 +44,7 @@ def build_orchestrator(skip_telegram: bool = False) -> Orchestrator:
 
     return Orchestrator(
         gemini_api_key=os.environ["GEMINI_API_KEY"],
-        cryptopanic_token=os.environ["CRYPTOPANIC_TOKEN"],
+        cryptopanic_token=os.environ.get("CRYPTOPANIC_TOKEN"),
         coingecko_api_key=os.environ.get("COINGECKO_API_KEY"),
         alpha_vantage_key=os.environ.get("ALPHA_VANTAGE_API_KEY"),
         fred_api_key=os.environ.get("FRED_API_KEY"),

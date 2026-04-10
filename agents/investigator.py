@@ -123,7 +123,7 @@ class InvestigatorAgent:
     def __init__(
         self,
         gemini_api_key: str,
-        cryptopanic_token: str,
+        cryptopanic_token: str | None = None,
         coingecko_api_key: str | None = None,
         alpha_vantage_key: str | None = None,
         fred_api_key: str | None = None,
@@ -218,6 +218,8 @@ class InvestigatorAgent:
 
     def _collect_news(self, tickers: list[str]) -> str:
         """CryptoPanic headlines formatted for the prompt."""
+        if not self.cryptopanic_token:
+            return "CryptoPanic token not configured — news pillar unavailable."
         try:
             headlines = fetch_headlines(
                 auth_token=self.cryptopanic_token,

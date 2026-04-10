@@ -79,7 +79,7 @@ class Orchestrator:
     def __init__(
         self,
         gemini_api_key: str,
-        cryptopanic_token: str,
+        cryptopanic_token: str | None = None,
         coingecko_api_key: str | None = None,
         alpha_vantage_key: str | None = None,
         fred_api_key: str | None = None,
