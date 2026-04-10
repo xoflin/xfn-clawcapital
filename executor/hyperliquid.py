@@ -164,20 +164,25 @@ class HyperliquidExecutor:
 
         base_url = HL_TESTNET_URL if testnet else HL_MAINNET_URL
 
-        # Construir wallet a partir da chave privada
-        account = eth_account.Account.from_key(private_key)
+        # Usar a chave privada diretamente (API atual do SDK)
+        key_to_use = agent_key if agent_key else private_key
 
-        # Chave de agente (opcional — isola permissões de trading)
-        if agent_key:
-            agent_account = eth_account.Account.from_key(agent_key)
-        else:
-            agent_account = account
+        try:
+            # Nova API: Exchange espera apenas a private key e wallet address
+            exchange = Exchange(
+                private_key=key_to_use,
+                address=wallet_address,
+                base_url=base_url,
+            )
+        except TypeError:
+            # Fallback para versão anterior se necessário
+            from hyperliquid.utils import Wallet
+            wallet = Wallet(private_key=key_to_use)
+            exchange = Exchange(
+                wallet=wallet,
+                base_url=base_url,
+            )
 
-        exchange = Exchange(
-            account=agent_account,
-            base_url=base_url,
-            account_address=wallet_address,
-        )
         info = Info(base_url=base_url, skip_ws=True)
 
         env = "TESTNET" if testnet else "MAINNET"
