@@ -114,16 +114,24 @@ try:
     import eth_account
     from hyperliquid.exchange import Exchange
 
-    account  = eth_account.Account.from_key(private_key)
+    account = eth_account.Account.from_key(private_key)
+
+    # Obter meta e spot_meta via HTTP primeiro para evitar bug no SDK
+    meta_resp     = hl_post({"type": "meta"})
+    spot_meta_resp = hl_post({"type": "spotMeta"})
+
     exchange = Exchange(
         wallet=account,
         base_url=BASE_URL,
         account_address=wallet,
+        meta=meta_resp,
+        spot_meta=spot_meta_resp,
     )
     print("✅ Exchange SDK inicializado — pronto para ordens!")
 except Exception as e:
+    import traceback
     print(f"⚠️  Exchange SDK falhou: {e}")
-    print("   (API HTTP funciona — workaround possível se necessário)")
+    traceback.print_exc()
 
 print("\n" + "=" * 60)
 print("PRÓXIMOS PASSOS:")
