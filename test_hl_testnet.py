@@ -46,7 +46,7 @@ try:
     account = eth_account.Account.from_key(private_key)
 
     exchange = Exchange(
-        account=account,
+        wallet=account,
         base_url="https://api.hyperliquid-testnet.xyz",
         account_address=wallet,
     )
