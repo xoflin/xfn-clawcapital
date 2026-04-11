@@ -116,7 +116,14 @@ Instructions:
 - HOLD only when signals are genuinely contradictory or flat — not merely because data is incomplete.
 - Incomplete data is normal in crypto — use what is available and assign conviction accordingly.
 - Always set a stop_loss_price (use {stop_loss_pct:.1f}% from entry if no technical level is available).
-- conviction reflects your confidence in the direction: 0.0 = uncertain, 1.0 = very confident.
+- conviction reflects your confidence in the direction:
+    0.0–0.3 = weak / conflicting signals
+    0.4–0.6 = moderate / some uncertainty
+    0.7–0.8 = strong / clear directional signal
+    0.9–1.0 = very strong / multiple confirming signals
+- CRITICAL: conviction MUST differ across assets. Each asset has a unique risk/reward profile.
+  Returning the same conviction for all tickers indicates you did not analyse them individually.
+  If two assets appear equally uncertain, one must still score higher based on relative strength.
 
 Respond with JSON ONLY:
 
@@ -365,6 +372,11 @@ class ManagerAgent:
                 "actionable":   [],
                 "error":        str(e),
             }
+
+        # Detect lazy-LLM: all convictions identical → model didn't differentiate
+        convictions = [float(r.get("conviction", 0)) for r in raw_decisions if "conviction" in r]
+        if len(convictions) > 1 and len(set(convictions)) == 1:
+            print(f"  [Manager] ⚠ uniform conviction={convictions[0]:.2f} across all tickers — model did not differentiate")
 
         decisions  = self._build_decisions(
             raw_decisions, investigator_output, market_prices,
