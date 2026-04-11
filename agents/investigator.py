@@ -214,18 +214,18 @@ class InvestigatorAgent:
                 time.sleep(12)  # 5 req/min on free plan → ~12s between 3-req reports
             except RuntimeError as e:
                 # AV returned a rate-limit error — exhaust quota tracker to block further calls
-                if "rate limit" in str(e).lower():
+                is_ratelimit = "rate limit" in str(e).lower()
+                if is_ratelimit:
                     self._quota.mark_exhausted("alpha_vantage")
-                lines.append(f"  {ticker}: AV error — {str(e)[:50]}")
+                    lines.append(f"  {ticker}: AV error — quota exhausted (daily limit reached)")
+                else:
+                    lines.append(f"  {ticker}: AV error — {str(e)[:60]}")
                 break  # no point retrying remaining tickers
             except Exception as e:
-                lines.append(f"  {ticker}: AV error — {str(e)[:50]}")
+                lines.append(f"  {ticker}: AV error — {str(e)[:60]}")
 
         if not lines:
             return "No tickers with technical analysis available."
-        if len(tickers) > self.max_av_tickers:
-            skipped = tickers[self.max_av_tickers:]
-            lines.append(f"  (skipped due to quota: {', '.join(skipped)})")
         return "\n".join(lines)
 
     def _collect_news(self, tickers: list[str]) -> str:
@@ -322,25 +322,35 @@ class InvestigatorAgent:
             return f"DeFiLlama error: {e}"
 
     def _collect_derivatives(self, tickers: list[str]) -> str:
-        """Fetches funding rates and long/short ratios from CoinGlass."""
+        """Fetches funding rates and long/short ratios (Bybit → Binance → OKX fallback)."""
         try:
             snapshot = fetch_derivatives_snapshot(tickers)
             lines = []
+            failed: list[str] = []
 
             for fr in snapshot.get("funding_rates", []):
                 ticker = fr.get("ticker", "?")
-                rate = fr.get("avg_funding_rate_pct", 0)
+                if fr.get("interpretation") == "No data":
+                    failed.append(ticker)
+                    continue
+                rate   = fr.get("avg_funding_rate_pct", 0)
                 interp = fr.get("interpretation", "")
                 lines.append(f"  {ticker} Funding: {rate:+.4f}% — {interp}")
 
             for ls in snapshot.get("long_short_ratios", []):
-                ticker = ls.get("ticker", "?")
-                long_pct = ls.get("long_pct", 50)
+                ticker   = ls.get("ticker", "?")
+                if ls.get("interpretation") == "No data":
+                    continue  # already noted in funding_rates pass
+                long_pct  = ls.get("long_pct", 50)
                 short_pct = ls.get("short_pct", 50)
-                interp = ls.get("interpretation", "")
+                interp    = ls.get("interpretation", "")
                 lines.append(f"  {ticker} L/S: {long_pct:.1f}% / {short_pct:.1f}% — {interp}")
 
-            return "\n".join(lines) if lines else "Derivatives data unavailable."
+            if not lines:
+                return "Derivatives data unavailable."
+            if failed:
+                lines.append(f"  (no data for: {', '.join(failed)})")
+            return "\n".join(lines)
         except Exception as e:
             return f"CoinGlass error: {e}"
 
