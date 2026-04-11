@@ -25,9 +25,14 @@ from skills.learning.trade_analyzer import get_prompt_context as _get_lessons
 # Constants
 # ------------------------------------------------------------------
 
-_MODEL_PRIMARY  = "gemini-2.5-flash"
-_MODEL_FALLBACK = "gemini-2.5-flash-lite"
-_MODEL_NAME     = _MODEL_PRIMARY
+_MODEL_CHAIN = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
+_MODEL_PRIMARY = _MODEL_CHAIN[0]
+_MODEL_NAME    = _MODEL_PRIMARY
 
 
 # ------------------------------------------------------------------
@@ -237,21 +242,30 @@ class ManagerAgent:
         if not allowed:
             raise RuntimeError(f"Gemini Pro quota: {reason}")
 
+        import re as _re, time as _time
         last_err = None
-        for model in (_MODEL_PRIMARY, _MODEL_FALLBACK):
+        used_model = None
+        for model in _MODEL_CHAIN:
             try:
                 response = self._genai.models.generate_content(
                     model=model,
                     contents=prompt,
                 )
-                if model != _MODEL_PRIMARY:
-                    print(f"  [Manager] ⚠ using fallback model: {model}")
+                used_model = model
                 break
             except Exception as e:
                 last_err = e
+                err_str = str(e)
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    m = _re.search(r"retry[^\d]*(\d+(?:\.\d+)?)s", err_str, _re.I)
+                    wait = min(float(m.group(1)) if m else 5, 30)
+                    print(f"  [Manager] {model} quota hit — trying next in {wait:.0f}s")
+                    _time.sleep(wait)
                 continue
-        else:
-            raise RuntimeError(f"All Gemini models failed: {last_err}")
+        if used_model is None:
+            raise RuntimeError(f"All Gemini models exhausted: {last_err}")
+        if used_model != _MODEL_PRIMARY:
+            print(f"  [Manager] ⚠ using fallback: {used_model}")
         raw = response.text.strip()
 
         if raw.startswith("```"):

@@ -20,8 +20,13 @@ from pathlib import Path
 QUOTA_FILE = Path(__file__).parent.parent / "memory" / "quota-state.json"
 
 DAILY_LIMITS: dict[str, int] = {
-    "gemini_pro":    100,
-    "gemini_flash":  1500,
+    # Gemini free tier: each model has its own separate quota
+    # Combined chain: 2.5-flash(20) + 2.5-flash-lite(20) + 2.0-flash(200) + 1.5-flash(1500)
+    # Tracker counts total calls across all models — conservative limit is 20 (worst model)
+    # In practice the fallback chain means we have ~1740 combined, but we cap at 50
+    # to avoid burning through all models in a single day
+    "gemini_flash":  50,
+    "gemini_pro":    50,
     "alpha_vantage": 25,   # 25 calls/day → 8 reports max (3 calls each)
 }
 

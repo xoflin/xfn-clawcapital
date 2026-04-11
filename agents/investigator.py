@@ -39,9 +39,19 @@ from skills.data_fetchers.coinglass import fetch_derivatives_snapshot
 from skills.learning.trade_analyzer import get_prompt_context as _get_lessons
 
 
-_MODEL_PRIMARY  = "gemini-2.5-flash"
-_MODEL_FALLBACK = "gemini-2.5-flash-lite"
-_MODEL_NAME     = _MODEL_PRIMARY  # used for display
+# Model chain — tried in order, first success wins.
+# Free tier daily limits (per model, separate quotas):
+#   gemini-2.5-flash      → 20 req/day
+#   gemini-2.5-flash-lite → 20 req/day
+#   gemini-2.0-flash      → 200 req/day
+#   gemini-1.5-flash      → 1500 req/day
+_MODEL_CHAIN = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+]
+_MODEL_PRIMARY = _MODEL_CHAIN[0]
 
 
 # ------------------------------------------------------------------
@@ -394,20 +404,31 @@ class InvestigatorAgent:
             raise RuntimeError(f"Gemini Flash quota: {reason}")
 
         last_err = None
-        for model in (_MODEL_PRIMARY, _MODEL_FALLBACK):
+        used_model = None
+        for model in _MODEL_CHAIN:
             try:
                 response = self._genai.models.generate_content(
                     model=model,
                     contents=prompt,
                 )
-                if model != _MODEL_PRIMARY:
-                    print(f"  [Gemini] ⚠ using fallback model: {model}")
+                used_model = model
                 break
             except Exception as e:
                 last_err = e
+                err_str = str(e)
+                # Extract retry delay if API suggests one
+                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                    import re
+                    m = re.search(r"retry[^\d]*(\d+(?:\.\d+)?)s", err_str, re.I)
+                    wait = min(float(m.group(1)) if m else 5, 30)
+                    print(f"  [Gemini] {model} quota hit — trying next model in {wait:.0f}s")
+                    import time as _time; _time.sleep(wait)
                 continue
-        else:
-            raise RuntimeError(f"All Gemini models failed: {last_err}")
+        if used_model is None:
+            raise RuntimeError(f"All Gemini models exhausted: {last_err}")
+        self._last_model_used = used_model  # exposed for display in run()
+        if used_model != _MODEL_PRIMARY:
+            print(f"  [Gemini] ⚠ using fallback: {used_model}")
         raw = response.text.strip()
 
         if raw.startswith("```"):
@@ -541,7 +562,8 @@ class InvestigatorAgent:
                 "investigator_notes": "Automatic synthesis failed — raw data included.",
             }
 
-        print(f"  [{_MODEL_PRIMARY}]  {'✓' if _gem_ok else '✗'} │ {gem_summary}")
+        _display_model = getattr(self, "_last_model_used", _MODEL_PRIMARY)
+        print(f"  [{_display_model}]  {'✓' if _gem_ok else '✗'} │ {gem_summary}")
 
         return {
             "agent":     "investigator",
