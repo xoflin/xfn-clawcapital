@@ -113,9 +113,17 @@ Stop loss default: {stop_loss_pct:.1f}% | Min R/R: {risk_reward_ratio:.1f}:1
 ---
 Instructions:
 - Decide BUY, SELL, or HOLD for each asset based on the overall_bias, asset scores, and market data.
+- Respect the overall_bias as a strong constraint:
+  * Bearish bias → SELL or HOLD, not BUY
+  * Bullish bias → BUY or HOLD, not SELL
+  * Neutral bias → any direction is acceptable, but balance BUY/SELL
 - HOLD only when signals are genuinely contradictory or flat — not merely because data is incomplete.
 - Incomplete data is normal in crypto — use what is available and assign conviction accordingly.
-- Always set a stop_loss_price (use {stop_loss_pct:.1f}% from entry if no technical level is available).
+- Stop loss calculation (CRITICAL):
+  * For BUY:  stop_loss = entry × (1.0 - {stop_loss_pct}/100)  [SL must be < entry]
+  * For SELL: stop_loss = entry × (1.0 + {stop_loss_pct}/100)  [SL must be > entry]
+  * Example: BUY at 100 with 3% SL → SL = 100 × 0.97 = 97 (below entry)
+  * Example: SELL at 100 with 3% SL → SL = 100 × 1.03 = 103 (above entry)
 - conviction reflects your confidence in the direction:
     0.0–0.3 = weak / conflicting signals
     0.4–0.6 = moderate / some uncertainty
