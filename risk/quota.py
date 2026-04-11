@@ -1,7 +1,8 @@
 """
 Risk: API Quota Tracker
-Persists daily API call counts AND last-used timestamps to prevent
-exhausting limited quotas and to spread calls evenly across the day.
+Persists daily API call counts and enforces time-based windows to
+distribute calls across active market hours instead of burning quota
+in the first cycles of the day.
 
 Currently tracked:
   - gemini_pro:    100 req/day (free tier) — ManagerAgent
@@ -18,43 +19,52 @@ from pathlib import Path
 
 QUOTA_FILE = Path(__file__).parent.parent / "memory" / "quota-state.json"
 
-# Daily limits per service.
-# alpha_vantage: limit is real API calls. get_technical_report() uses 3
-# calls/ticker — check_and_consume() is called with units=3.
 DAILY_LIMITS: dict[str, int] = {
     "gemini_pro":    100,
     "gemini_flash":  1500,
-    "alpha_vantage": 25,   # 25 calls/day → ~8 full reports (3 each)
+    "alpha_vantage": 25,   # 25 calls/day → 8 reports max (3 calls each)
 }
 
-# Minimum seconds between consecutive uses of each service.
-# Ensures calls are spread evenly across 24h instead of burning the
-# quota in the first few cycles.
-#
-# alpha_vantage: floor(25 / 3) = 8 max reports/day
-#   → 24h / 8 = 3h minimum between reports (10 800s)
-# gemini_flash/pro: limits are generous — no interval enforced (0)
-MIN_INTERVAL_SECONDS: dict[str, int] = {
-    "gemini_pro":    0,
-    "gemini_flash":  0,
-    "alpha_vantage": 10_800,  # 3 hours
+# UTC hours when Alpha Vantage calls are permitted.
+# Chosen to coincide with key market transitions (PT = UTC+1 summer):
+#   00 UTC (01 PT) — Asian open
+#   07 UTC (08 PT) — Before European open
+#   09 UTC (10 PT) — European session active
+#   13 UTC (14 PT) — US pre-market
+#   14 UTC (15 PT) — NYSE open
+#   17 UTC (18 PT) — European close / US midday
+#   20 UTC (21 PT) — US session active
+#   21 UTC (22 PT) — Pre-NYSE close
+# 8 windows × 3 calls = 24 calls ≤ 25 daily limit
+ALLOWED_WINDOWS: dict[str, set] = {
+    "alpha_vantage": {0, 7, 9, 13, 14, 17, 20, 21},
 }
 
-# Safety threshold — stop at this % of daily limit to leave headroom
 SAFETY_PCT = 0.90
 
 
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def _now_ts() -> float:
-    return datetime.now(timezone.utc).timestamp()
+    return _now_utc().timestamp()
+
+
+def _next_window(current_hour: int, windows: set) -> int:
+    """Returns the next allowed UTC hour after current_hour."""
+    future = sorted(h for h in windows if h > current_hour)
+    return future[0] if future else sorted(windows)[0]
 
 
 class QuotaTracker:
     """
     Persistent daily quota tracker. Survives restarts.
 
-    Enforces two independent guards per service:
+    Enforces per service:
       1. Daily call count  — never exceed DAILY_LIMITS × SAFETY_PCT
-      2. Minimum interval  — never call again before MIN_INTERVAL_SECONDS
+      2. Active windows    — calls only permitted at specific UTC hours
+                             (one use per window per day)
     """
 
     def __init__(self):
@@ -74,12 +84,12 @@ class QuotaTracker:
                 print("[QuotaTracker] WARNING — corrupt quota file, resetting")
             except Exception:
                 print("[QuotaTracker] WARNING — could not read quota file, resetting")
-        return {"date": date.today().isoformat(), "counts": {}, "last_used": {}}
+        return {"date": date.today().isoformat(), "counts": {}, "last_used": {}, "used_windows": {}}
 
     def _save(self) -> None:
         QUOTA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        # Ensure both keys always exist
         self._state.setdefault("last_used", {})
+        self._state.setdefault("used_windows", {})
         QUOTA_FILE.write_text(
             json.dumps(self._state, indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -88,9 +98,12 @@ class QuotaTracker:
     def _reset_if_new_day(self) -> None:
         today = date.today().isoformat()
         if self._state.get("date") != today:
-            # Preserve last_used across midnight so interval guard works correctly
-            last_used = self._state.get("last_used", {})
-            self._state = {"date": today, "counts": {}, "last_used": last_used}
+            self._state = {
+                "date":         today,
+                "counts":       {},
+                "last_used":    {},
+                "used_windows": {},   # resets daily — each window available once/day
+            }
             self._save()
 
     # ------------------------------------------------------------------
@@ -99,7 +112,7 @@ class QuotaTracker:
 
     def check_and_consume(self, service: str, units: int = 1) -> tuple:
         """
-        Checks quota + interval, then consumes N calls if both pass.
+        Checks quota + active window, then consumes N calls if both pass.
 
         Args:
             service: Service name (e.g. "alpha_vantage").
@@ -109,23 +122,43 @@ class QuotaTracker:
             (allowed: bool, reason: str)
         """
         self._state.setdefault("last_used", {})
-        limit = DAILY_LIMITS.get(service)
+        self._state.setdefault("used_windows", {})
 
+        limit = DAILY_LIMITS.get(service)
         if limit is None:
             return True, ""  # Unknown service — no limit enforced
 
-        now = _now_ts()
+        now     = _now_utc()
+        windows = ALLOWED_WINDOWS.get(service)
 
-        # ── 1. Minimum interval check ─────────────────────────────────
-        min_interval = MIN_INTERVAL_SECONDS.get(service, 0)
-        if min_interval > 0:
-            last_ts = self._state["last_used"].get(service, 0)
-            elapsed = now - last_ts
-            if elapsed < min_interval:
-                wait_min = math.ceil((min_interval - elapsed) / 60)
+        # ── 1. Active window check ────────────────────────────────────
+        if windows:
+            current_hour = now.hour
+
+            if current_hour not in windows:
+                next_h = _next_window(current_hour, windows)
+                # How many minutes until next window
+                if next_h > current_hour:
+                    wait_min = (next_h - current_hour) * 60 - now.minute
+                else:  # wraps to next day
+                    wait_min = (24 - current_hour + next_h) * 60 - now.minute
                 return False, (
-                    f"{service} rate-spaced — next use in {wait_min}min "
-                    f"(interval: {min_interval//3600}h)"
+                    f"{service} outside active window — "
+                    f"next at {next_h:02d}:00 UTC (~{wait_min}min)"
+                )
+
+            # One use per window per day
+            used_key = f"{service}_{current_hour:02d}"
+            if self._state["used_windows"].get(used_key):
+                next_h   = _next_window(current_hour, windows)
+                wait_min = (
+                    (next_h - current_hour) * 60 - now.minute
+                    if next_h > current_hour
+                    else (24 - current_hour + next_h) * 60 - now.minute
+                )
+                return False, (
+                    f"{service} window {current_hour:02d}:00 UTC already used — "
+                    f"next at {next_h:02d}:00 UTC (~{wait_min}min)"
                 )
 
         # ── 2. Daily count check ──────────────────────────────────────
@@ -144,15 +177,14 @@ class QuotaTracker:
 
         # ── 3. Consume ────────────────────────────────────────────────
         self._state["counts"][service] = current + units
-        self._state["last_used"][service] = now
+        self._state["last_used"][service] = now.timestamp()
+        if windows:
+            self._state["used_windows"][f"{service}_{now.hour:02d}"] = True
         self._save()
         return True, ""
 
     def mark_exhausted(self, service: str) -> None:
-        """
-        Marks a service as quota-exhausted for today.
-        Called when the real API returns a rate-limit error.
-        """
+        """Marks a service as quota-exhausted (real API returned rate-limit error)."""
         limit = DAILY_LIMITS.get(service)
         if limit is not None:
             self._state.setdefault("last_used", {})
@@ -166,28 +198,23 @@ class QuotaTracker:
         used  = self._state["counts"].get(service, 0)
         return max(0, limit - used)
 
-    def next_available_in(self, service: str) -> int:
-        """
-        Returns seconds until the service is available again.
-        Considers both interval and daily limit (0 if already available).
-        """
-        self._state.setdefault("last_used", {})
-        min_interval = MIN_INTERVAL_SECONDS.get(service, 0)
-        if min_interval == 0:
-            return 0
-        last_ts = self._state["last_used"].get(service, 0)
-        wait = min_interval - (_now_ts() - last_ts)
-        return max(0, int(wait))
-
     def summary(self) -> dict:
-        self._state.setdefault("last_used", {})
+        self._state.setdefault("used_windows", {})
+        now = _now_utc()
         out = {"date": self._state["date"], "usage": {}}
         for service, limit in DAILY_LIMITS.items():
-            wait_s = self.next_available_in(service)
+            windows    = ALLOWED_WINDOWS.get(service)
+            in_window  = windows is not None and now.hour in windows
+            used_key   = f"{service}_{now.hour:02d}"
+            win_used   = bool(self._state["used_windows"].get(used_key))
+            next_h     = _next_window(now.hour, windows) if windows else None
+
             out["usage"][service] = {
-                "used":           self._state["counts"].get(service, 0),
-                "limit":          limit,
-                "remaining":      self.remaining(service),
-                "next_avail_min": round(wait_s / 60, 1) if wait_s else 0,
+                "used":        self._state["counts"].get(service, 0),
+                "limit":       limit,
+                "remaining":   self.remaining(service),
+                "in_window":   in_window,
+                "window_used": win_used,
+                "next_window": f"{next_h:02d}:00 UTC" if next_h is not None else None,
             }
         return out
