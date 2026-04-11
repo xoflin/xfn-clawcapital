@@ -64,6 +64,7 @@ def build_orchestrator(skip_telegram: bool = False) -> Orchestrator:
         max_positions=int(os.environ.get("MAX_POSITIONS", "5")),
         max_av_tickers=int(os.environ.get("MAX_AV_TICKERS", "2")),
         telegram_timeout=int(os.environ.get("TELEGRAM_TIMEOUT", "300")),
+        use_real_balance=os.environ.get("USE_REAL_BALANCE", "true").lower() == "true",
         skip_telegram=skip_telegram,
     )
 

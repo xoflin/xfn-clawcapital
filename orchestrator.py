@@ -100,11 +100,13 @@ class Orchestrator:
         max_av_tickers: int = 2,
         telegram_timeout: int = 300,
         skip_telegram: bool = False,
+        use_real_balance: bool = True,
     ):
-        self.capital       = capital
-        self.watchlist     = [t.upper() for t in (watchlist or ["BTC", "ETH", "SOL"])]
+        self.capital         = capital
+        self.watchlist       = [t.upper() for t in (watchlist or ["BTC", "ETH", "SOL"])]
         self.telegram_timeout = telegram_timeout
-        self.skip_telegram    = skip_telegram
+        self.skip_telegram   = skip_telegram
+        self.use_real_balance = use_real_balance
 
         self.investigator = InvestigatorAgent(
             gemini_api_key=gemini_api_key,
@@ -312,8 +314,11 @@ class Orchestrator:
         effective_capital = self.capital
         real_balance = self.executor.get_available_balance()
         if real_balance is not None:
-            effective_capital = real_balance
             results["real_balance"] = real_balance
+            # Only override if USE_REAL_BALANCE is enabled (for live trading)
+            # When disabled (training mode), use configured capital even if real balance is different
+            if self.use_real_balance:
+                effective_capital = real_balance
 
         trades_path = MEMORY_DIR / "trades-history.json"
         is_cold_start = not trades_path.exists() or trades_path.stat().st_size < 10
