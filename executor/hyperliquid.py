@@ -346,7 +346,7 @@ class HyperliquidExecutor:
 
         try:
             result = self._exchange.order(
-                coin=order.coin,
+                order.coin,   # positional 'name' — SDK renamed from 'coin'
                 is_buy=is_buy,
                 sz=order.size_units,
                 limit_px=limit_px,
@@ -371,7 +371,7 @@ class HyperliquidExecutor:
         # 2. Stop Loss (trigger order — executa a mercado quando atingido)
         try:
             sl_result = self._exchange.order(
-                coin=order.coin,
+                order.coin,
                 is_buy=not is_buy,       # Inverso: fecha posição
                 sz=order.size_units,
                 limit_px=order.stop_loss_price,
@@ -395,7 +395,7 @@ class HyperliquidExecutor:
         # 3. Take Profit (trigger order)
         try:
             tp_result = self._exchange.order(
-                coin=order.coin,
+                order.coin,
                 is_buy=not is_buy,
                 sz=order.size_units,
                 limit_px=order.take_profit_price,
@@ -441,7 +441,7 @@ class HyperliquidExecutor:
             for oid in [original.sl_order_id, original.tp_order_id]:
                 if oid and oid > 0:
                     try:
-                        self._exchange.cancel(coin=coin, oid=oid)
+                        self._exchange.cancel(coin, oid)  # positional args
                     except Exception:
                         pass
 
@@ -454,7 +454,7 @@ class HyperliquidExecutor:
             )
             try:
                 self._exchange.order(
-                    coin=coin,
+                    coin,   # positional 'name'
                     is_buy=is_buy,
                     sz=original.size_units,
                     limit_px=limit_px,
