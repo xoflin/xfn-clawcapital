@@ -354,13 +354,21 @@ class HyperliquidExecutor:
                 reduce_only=False,
             )
             self._check_hl_response(result, "ordem principal")
-            status_data = result.get("response", {}).get("data", {})
-            statuses = status_data.get("statuses", [{}])
-            filled = statuses[0] if statuses else {}
-            order.hl_order_id = filled.get("resting", {}).get("oid") or filled.get("filled", {}).get("oid")
-            order.filled_price = float(filled.get("filled", {}).get("avgPx", order.entry_price) or order.entry_price)
-            order.filled_at = datetime.now(timezone.utc).isoformat()
-            order.status = "filled"
+            # Parse response — handle both legacy and current SDK response shapes
+            resp_data  = result.get("response", {}).get("data", result.get("data", {}))
+            statuses   = resp_data.get("statuses", [{}])
+            filled     = statuses[0] if statuses else {}
+            # OID can be in resting (limit) or filled (market/IOC)
+            resting    = filled.get("resting") or {}
+            filled_dat = filled.get("filled") or {}
+            order.hl_order_id  = resting.get("oid") or filled_dat.get("oid")
+            avg_px             = filled_dat.get("avgPx") or filled_dat.get("px")
+            order.filled_price = float(avg_px) if avg_px else order.entry_price
+            order.filled_at    = datetime.now(timezone.utc).isoformat()
+            order.status       = "filled"
+            # Log raw response for debugging if OID is still None
+            if order.hl_order_id is None:
+                print(f"  [LIVE] ⚠ OID not found in response — raw: {statuses}")
             print(f"  [LIVE] Filled @ ${order.filled_price:,.4f} | OID: {order.hl_order_id}")
         except Exception as e:
             order.status = "rejected"
@@ -385,8 +393,10 @@ class HyperliquidExecutor:
                 reduce_only=True,
             )
             self._check_hl_response(sl_result, "stop loss")
-            sl_statuses = sl_result.get("response", {}).get("data", {}).get("statuses", [{}])
-            order.sl_order_id = sl_statuses[0].get("resting", {}).get("oid")
+            sl_data = sl_result.get("response", {}).get("data", sl_result.get("data", {}))
+            sl_statuses = sl_data.get("statuses", [{}])
+            sl_first = sl_statuses[0] if sl_statuses else {}
+            order.sl_order_id = (sl_first.get("resting") or {}).get("oid") or (sl_first.get("filled") or {}).get("oid")
             print(f"  [LIVE] SL colocado @ ${order.stop_loss_price:,.4f} | OID: {order.sl_order_id}")
         except Exception as e:
             order.notes += f" | SL manual necessário @ ${order.stop_loss_price:.4f}: {e}"
@@ -409,8 +419,10 @@ class HyperliquidExecutor:
                 reduce_only=True,
             )
             self._check_hl_response(tp_result, "take profit")
-            tp_statuses = tp_result.get("response", {}).get("data", {}).get("statuses", [{}])
-            order.tp_order_id = tp_statuses[0].get("resting", {}).get("oid")
+            tp_data = tp_result.get("response", {}).get("data", tp_result.get("data", {}))
+            tp_statuses = tp_data.get("statuses", [{}])
+            tp_first = tp_statuses[0] if tp_statuses else {}
+            order.tp_order_id = (tp_first.get("resting") or {}).get("oid") or (tp_first.get("filled") or {}).get("oid")
             print(f"  [LIVE] TP colocado @ ${order.take_profit_price:,.4f} | OID: {order.tp_order_id}")
         except Exception as e:
             order.notes += f" | TP manual necessário @ ${order.take_profit_price:.4f}: {e}"

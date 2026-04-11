@@ -38,7 +38,6 @@ case "$cmd" in
         echo "▶ Starting ClawCapital (smart scheduler)..."
         cd "$SCRIPT_DIR"
         nohup "$PYTHON" "$SCRIPT_DIR/scheduler.py" \
-            --skip-telegram \
             >> "$LOG_FILE" 2>&1 &
         echo $! > "$PID_FILE"
         echo "✓ Started — PID $(cat "$PID_FILE")"
