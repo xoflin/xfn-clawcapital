@@ -1,98 +1,67 @@
 """
 Skill: data_fetchers/coinglass
-Connector for CoinGlass public endpoints — derivatives market data.
+Derivatives market data via Binance Futures public API.
 
-Public endpoints (no auth required):
-  - Funding rates per asset
-  - Open Interest (total $ at risk in perpetuals)
-  - Long/Short ratio
+Replaced CoinGlass (went paid-only, returns 0s silently) with Binance Futures
+endpoints — free, reliable, no auth required.
+
+Endpoints used:
+  - /fapi/v1/premiumIndex     → current funding rate (real-time)
+  - /futures/data/globalLongShortAccountRatio → long/short ratio
 
 Why it matters for trading signals:
   - Funding Rate > 0.1%  → longs paying shorts → overheated longs → potential reversal
   - Funding Rate < -0.1% → shorts paying longs → overheated shorts → potential squeeze
-  - Rising OI + rising price → trend confirmation
-  - Falling OI + rising price → weak rally, potential reversal
-  - Long/Short ratio > 60% longs → crowded longs → caution
-
-Docs: https://coinglass.com/api
+  - Long/Short ratio > 65% longs → crowded longs → contrarian bearish
+  - Long/Short ratio < 35% longs → crowded shorts → contrarian bullish
 """
 
 import requests
 from datetime import datetime, timezone
 
-COINGLASS_BASE = "https://open-api.coinglass.com/public/v2"
-COINGLASS_FUTURES = "https://fapi.coinglass.com/api"
+BINANCE_FAPI = "https://fapi.binance.com"
 
-# Ticker mapping to CoinGlass symbols
-TICKER_MAP = {
-    "BTC": "BTC",
-    "ETH": "ETH",
-    "SOL": "SOL",
-    "BNB": "BNB",
-    "XRP": "XRP",
-    "AVAX": "AVAX",
-    "DOGE": "DOGE",
-    "ARB": "ARB",
+# Ticker → Binance USDT-M perp symbol
+SYMBOL_MAP = {
+    "BTC":  "BTCUSDT",
+    "ETH":  "ETHUSDT",
+    "SOL":  "SOLUSDT",
+    "BNB":  "BNBUSDT",
+    "XRP":  "XRPUSDT",
+    "AVAX": "AVAXUSDT",
+    "DOGE": "DOGEUSDT",
+    "ARB":  "ARBUSDT",
 }
 
 
 def fetch_funding_rates(tickers: list[str]) -> list[dict]:
     """
-    Fetches funding rates for perpetual contracts across exchanges.
-
-    Args:
-        tickers: List of tickers (e.g. ["BTC", "ETH"]).
+    Fetches current funding rates from Binance Futures (premiumIndex).
 
     Returns:
-        [
-            {
-                "ticker": str,
-                "avg_funding_rate": float (%),
-                "signal": float (-1 to +1),
-                "interpretation": str,
-            },
-            ...
-        ]
+        [{"ticker", "avg_funding_rate_pct", "signal", "interpretation"}, ...]
     """
     results = []
-
     for ticker in tickers:
-        symbol = TICKER_MAP.get(ticker, ticker)
+        symbol = SYMBOL_MAP.get(ticker, f"{ticker}USDT")
         try:
-            response = requests.get(
-                f"{COINGLASS_FUTURES}/fundingRate/v3/history",
-                params={"symbol": symbol, "interval": "8h", "limit": 3},
-                headers={"accept": "application/json"},
+            resp = requests.get(
+                f"{BINANCE_FAPI}/fapi/v1/premiumIndex",
+                params={"symbol": symbol},
                 timeout=10,
             )
-            response.raise_for_status()
-            data = response.json()
+            resp.raise_for_status()
+            data = resp.json()
 
-            rates = data.get("data", {}).get("dataMap", {})
-            if not rates:
-                results.append(_neutral_funding(ticker))
-                continue
+            rate = float(data.get("lastFundingRate", 0))
+            signal, interpretation = _interpret_funding(rate)
 
-            # Average across exchanges
-            all_rates = []
-            for exchange_data in rates.values():
-                for entry in exchange_data[:1]:  # Latest only
-                    try:
-                        all_rates.append(float(entry.get("fundingRate", 0)))
-                    except (ValueError, TypeError):
-                        pass
-
-            avg_rate = sum(all_rates) / len(all_rates) if all_rates else 0.0
-            signal, interpretation = _interpret_funding(avg_rate)
-
-            results.append(
-                {
-                    "ticker": ticker,
-                    "avg_funding_rate_pct": round(avg_rate * 100, 4),
-                    "signal": round(signal, 3),
-                    "interpretation": interpretation,
-                }
-            )
+            results.append({
+                "ticker":               ticker,
+                "avg_funding_rate_pct": round(rate * 100, 4),
+                "signal":               round(signal, 3),
+                "interpretation":       interpretation,
+            })
 
         except Exception as e:
             results.append({**_neutral_funding(ticker), "error": str(e)})
@@ -102,58 +71,39 @@ def fetch_funding_rates(tickers: list[str]) -> list[dict]:
 
 def fetch_long_short_ratio(tickers: list[str]) -> list[dict]:
     """
-    Fetches long/short ratio for major assets.
-
-    Args:
-        tickers: List of tickers.
+    Fetches global long/short account ratio from Binance Futures.
 
     Returns:
-        [{"ticker": str, "long_pct": float, "short_pct": float, "signal": float}, ...]
+        [{"ticker", "long_pct", "short_pct", "signal", "interpretation"}, ...]
     """
     results = []
-
     for ticker in tickers:
-        symbol = TICKER_MAP.get(ticker, ticker)
+        symbol = SYMBOL_MAP.get(ticker, f"{ticker}USDT")
         try:
-            response = requests.get(
-                f"https://fapi.coinglass.com/api/longShortRate",
-                params={"symbol": symbol, "interval": "1h", "limit": 1},
-                headers={"accept": "application/json"},
+            resp = requests.get(
+                f"{BINANCE_FAPI}/futures/data/globalLongShortAccountRatio",
+                params={"symbol": symbol, "period": "1h", "limit": 1},
                 timeout=10,
             )
-            response.raise_for_status()
-            data = response.json()
+            resp.raise_for_status()
+            entries = resp.json()
 
-            entries = data.get("data", {})
             if not entries:
                 results.append(_neutral_ls(ticker))
                 continue
 
-            # Get latest entry across exchanges
-            long_rates = []
-            for exchange_data in entries.values():
-                if exchange_data:
-                    try:
-                        long_rates.append(float(exchange_data[0].get("longRatio", 0.5)))
-                    except (ValueError, TypeError):
-                        pass
+            entry    = entries[0]
+            long_pct = float(entry.get("longAccount", 0.5))
+            short_pct = 1.0 - long_pct
+            signal   = round((0.5 - long_pct) * 2, 3)  # contrarian mapping
 
-            avg_long = sum(long_rates) / len(long_rates) if long_rates else 0.5
-            avg_short = 1.0 - avg_long
-
-            # Signal: 0.5 long → 0 (neutral), 0.7 long → -0.4 (crowded longs = bearish)
-            # Contrarian: too many longs = potential dump, too many shorts = potential squeeze
-            signal = round((0.5 - avg_long) * 2, 3)  # Contrarian mapping
-
-            results.append(
-                {
-                    "ticker": ticker,
-                    "long_pct": round(avg_long * 100, 1),
-                    "short_pct": round(avg_short * 100, 1),
-                    "signal": signal,
-                    "interpretation": _interpret_ls(avg_long),
-                }
-            )
+            results.append({
+                "ticker":         ticker,
+                "long_pct":       round(long_pct * 100, 1),
+                "short_pct":      round(short_pct * 100, 1),
+                "signal":         signal,
+                "interpretation": _interpret_ls(long_pct),
+            })
 
         except Exception as e:
             results.append({**_neutral_ls(ticker), "error": str(e)})
@@ -164,18 +114,11 @@ def fetch_long_short_ratio(tickers: list[str]) -> list[dict]:
 def fetch_derivatives_snapshot(tickers: list[str]) -> dict:
     """
     Full derivatives snapshot for the InvestigatorAgent.
-
-    Returns:
-        {
-            "funding_rates": [...],
-            "long_short_ratios": [...],
-            "fetched_at": str,
-        }
     """
     return {
-        "funding_rates": fetch_funding_rates(tickers),
-        "long_short_ratios": fetch_long_short_ratio(tickers),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "funding_rates":      fetch_funding_rates(tickers),
+        "long_short_ratios":  fetch_long_short_ratio(tickers),
+        "fetched_at":         datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -184,16 +127,16 @@ def fetch_derivatives_snapshot(tickers: list[str]) -> dict:
 # ------------------------------------------------------------------
 
 def _interpret_funding(rate: float) -> tuple[float, str]:
-    """Maps funding rate to signal and interpretation."""
+    """Maps funding rate to signal and interpretation string."""
     rate_pct = rate * 100
     if rate_pct > 0.1:
         return -0.5, "Longs overheated — potential reversal"
     elif rate_pct > 0.05:
-        return -0.2, "Mildly positive — slight long bias"
+        return -0.2, "Slightly bullish — mild long bias"
     elif rate_pct < -0.1:
         return 0.5, "Shorts overheated — potential squeeze"
     elif rate_pct < -0.05:
-        return 0.2, "Mildly negative — slight short bias"
+        return 0.2, "Slightly bearish — mild short bias"
     else:
         return 0.0, "Neutral funding"
 
@@ -212,18 +155,18 @@ def _interpret_ls(long_pct: float) -> str:
 
 def _neutral_funding(ticker: str) -> dict:
     return {
-        "ticker": ticker,
+        "ticker":               ticker,
         "avg_funding_rate_pct": 0.0,
-        "signal": 0.0,
-        "interpretation": "No data",
+        "signal":               0.0,
+        "interpretation":       "No data",
     }
 
 
 def _neutral_ls(ticker: str) -> dict:
     return {
-        "ticker": ticker,
-        "long_pct": 50.0,
-        "short_pct": 50.0,
-        "signal": 0.0,
+        "ticker":         ticker,
+        "long_pct":       50.0,
+        "short_pct":      50.0,
+        "signal":         0.0,
         "interpretation": "No data",
     }

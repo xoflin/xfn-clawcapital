@@ -414,7 +414,7 @@ class InvestigatorAgent:
         DW = 62   # data column width
 
         # ── helpers ──────────────────────────────────────────────────
-        _BAD = ("error", "unavailable", "not configured", "skipped —", "av error")
+        _BAD = ("error", "unavailable", "not configured", "skipped —", "av error", "no data", "no relevant")
 
         def _ok(data: str) -> bool:
             return not any(b in data.lower() for b in _BAD)
