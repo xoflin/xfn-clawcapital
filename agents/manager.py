@@ -377,12 +377,24 @@ class ManagerAgent:
         print("")
         for d in decisions:
             is_active = d.direction in ("BUY", "SELL") and not d.rejected
-            dir_str  = f"{d.direction:<4}" if is_active else "    "
+
             if is_active:
-                text = (d.thesis or "")[:65]
+                # ── Approved trade ────────────────────────────────────
+                dir_str = f"{d.direction:<4}"
+                text    = (d.thesis or "")[:65]
+
+            elif d.rejected:
+                # ── Gemini wanted BUY/SELL but RiskCalculator vetoed ──
+                dir_str = "✗   "
+                # Show first veto reason, stripped of % noise
+                reason  = d.rejection_reason.split(";")[0].strip()
+                text    = reason[:65]
+
             else:
-                text = (d.rejection_reason.split(";")[0].strip()[:65]
-                        if d.rejection_reason else "HOLD")
+                # ── Gemini decided HOLD ───────────────────────────────
+                dir_str = "HOLD"
+                text    = (d.thesis or "")[:65]
+
             print(
                 f"  {d.ticker:<4} {dir_str} | "
                 f"conv={d.conviction:.2f}  conf={d.confidence:.2f} | "
