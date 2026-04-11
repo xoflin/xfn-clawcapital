@@ -25,7 +25,9 @@ from skills.learning.trade_analyzer import get_prompt_context as _get_lessons
 # Constants
 # ------------------------------------------------------------------
 
-_MODEL_NAME = "gemini-2.5-flash-lite"
+_MODEL_PRIMARY  = "gemini-2.5-flash"
+_MODEL_FALLBACK = "gemini-2.5-flash-lite"
+_MODEL_NAME     = _MODEL_PRIMARY
 
 
 # ------------------------------------------------------------------
@@ -235,10 +237,21 @@ class ManagerAgent:
         if not allowed:
             raise RuntimeError(f"Gemini Pro quota: {reason}")
 
-        response = self._genai.models.generate_content(
-            model=_MODEL_NAME,
-            contents=prompt,
-        )
+        last_err = None
+        for model in (_MODEL_PRIMARY, _MODEL_FALLBACK):
+            try:
+                response = self._genai.models.generate_content(
+                    model=model,
+                    contents=prompt,
+                )
+                if model != _MODEL_PRIMARY:
+                    print(f"  [Manager] ⚠ using fallback model: {model}")
+                break
+            except Exception as e:
+                last_err = e
+                continue
+        else:
+            raise RuntimeError(f"All Gemini models failed: {last_err}")
         raw = response.text.strip()
 
         if raw.startswith("```"):
