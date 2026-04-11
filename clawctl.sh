@@ -17,7 +17,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PID_FILE="$SCRIPT_DIR/clawcapital.pid"
 LOG_FILE="$SCRIPT_DIR/logs/clawcapital.log"
-PYTHON="$SCRIPT_DIR/venv/bin/python"
+PYTHON="${SCRIPT_DIR}/.venv/bin/python"
+# Fallback to venv/ if .venv/ doesn't exist
+[[ ! -f "$PYTHON" ]] && PYTHON="${SCRIPT_DIR}/venv/bin/python"
 
 mkdir -p "$SCRIPT_DIR/logs"
 
