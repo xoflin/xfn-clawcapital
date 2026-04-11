@@ -36,6 +36,7 @@ from skills.data_fetchers.rss_feeds import fetch_rss_feeds, filter_articles_by_k
 from skills.data_fetchers.defillama import fetch_defi_snapshot
 from risk.quota import QuotaTracker
 from skills.data_fetchers.coinglass import fetch_derivatives_snapshot
+from skills.learning.trade_analyzer import get_prompt_context as _get_lessons
 
 
 _MODEL_NAME = "gemini-2.5-flash-lite"
@@ -75,8 +76,11 @@ You have access to the following real-time data:
 === DERIVATIVES MARKET (CoinGlass) ===
 {derivatives_data}
 
+=== HISTORICAL PERFORMANCE (Learning from past trades) ===
+{lessons_data}
+
 ---
-Based on this data, produce a structured JSON briefing with EXACTLY this format:
+Based on this data AND your past performance, produce a structured JSON briefing with EXACTLY this format:
 
 {{
   "macro_summary": "<2-3 sentences on the macro environment and its impact on crypto>",
@@ -370,6 +374,7 @@ class InvestigatorAgent:
         derivatives: str,
     ) -> dict:
         """Calls Gemini 2.5 Flash and returns the structured briefing."""
+        lessons = _get_lessons() or "No trade history yet — first cycle."
         prompt = _INVESTIGATOR_PROMPT.format(
             macro_context=macro,
             market_data=market,
@@ -379,6 +384,7 @@ class InvestigatorAgent:
             rss_data=rss_feeds,
             defi_data=defi,
             derivatives_data=derivatives,
+            lessons_data=lessons,
         )
 
         allowed, reason = self._quota.check_and_consume("gemini_flash")

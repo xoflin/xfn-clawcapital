@@ -18,6 +18,7 @@ from google import genai
 
 from risk.calculator import RiskCalculator, RiskConfig, SizingMethod
 from risk.quota import QuotaTracker
+from skills.learning.trade_analyzer import get_prompt_context as _get_lessons
 
 
 # ------------------------------------------------------------------
@@ -109,6 +110,11 @@ Stop loss default: {stop_loss_pct:.1f}% | Min R/R: {risk_reward_ratio:.1f}:1
 
 === CURRENT MARKET PRICES ===
 {market_prices}
+
+=== YOUR PAST PERFORMANCE ===
+{lessons_data}
+Use this to calibrate your conviction. If your past BUY win rate is low, be more
+selective with BUY signals. If a specific ticker underperforms, lower its conviction.
 
 ---
 Instructions:
@@ -213,6 +219,7 @@ class ManagerAgent:
             for ticker, price in market_prices.items()
         )
 
+        lessons = _get_lessons() or "No trade history yet — first trades."
         prompt = _MANAGER_PROMPT.format(
             briefing_json=json.dumps(briefing, ensure_ascii=False, indent=2),
             capital=self.capital,
@@ -221,6 +228,7 @@ class ManagerAgent:
             open_positions=open_positions,
             max_positions=self.max_positions,
             market_prices=prices_str,
+            lessons_data=lessons,
         )
 
         allowed, reason = self._quota.check_and_consume("gemini_pro")

@@ -19,6 +19,7 @@ from executor.hyperliquid import HyperliquidExecutor, HLMode
 from notifications.telegram import request_approval, send_notification, ApprovalResult
 from risk.drawdown import DrawdownTracker
 from skills.data_fetchers.coingecko import CoinGeckoClient
+from skills.learning.trade_analyzer import analyze as _analyze_trades
 
 
 MEMORY_DIR = Path(__file__).parent / "memory"
@@ -372,6 +373,14 @@ class Orchestrator:
         sl_tp_closes = self._check_sl_tp(market_prices)
         if sl_tp_closes:
             results["sl_tp_closes"] = sl_tp_closes
+            # Trade closed → re-analyze for learning
+            try:
+                lessons = _analyze_trades()
+                wr = lessons.get("win_rate", 0)
+                nt = lessons.get("total_trades", 0)
+                print(f"  Learning     ↺  {nt} trades analyzed  WR={wr:.0%}")
+            except Exception:
+                pass
 
         results["drawdown"] = self._drawdown.summary()
 
