@@ -199,8 +199,8 @@ class InvestigatorAgent:
             # get_technical_report makes 3 real API calls — consume 3 quota units upfront
             allowed, reason = self._quota.check_and_consume("alpha_vantage", units=3)
             if not allowed:
-                lines.append(f"  {ticker}: skipped — {reason}")
-                continue
+                lines.append(f"  skipped — {reason}")
+                break  # same reason applies to all remaining tickers
             try:
                 report = av.get_technical_report(ticker)
                 rsi    = report.get("rsi_latest") or {}
